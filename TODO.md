@@ -53,17 +53,20 @@ Edit log:
 - [ ] Link click vs caret placement is defined (edit source vs open)
 - [ ] `VisualRun` is role + source range + text; font size/color come from theme at layout time
 - [ ] One heading type-scale table in `Theme` (`line_height_base` used); delete the 1.85 copies in decorator / click / paint
+- [ ] Conceal by role: heading/list/task/quote prefixes reveal for the line; inline markers reveal by `group_range`; drop global Token vs Line; keep `Raw`
 - [ ] Toolbar or equivalent for Bold / Italic / Code
 - [ ] Tab / Shift+Tab indent and outdent the line or selection
 - [ ] `EditorView` only binds input and paints layout (no prefix re-detection)
 
 ## Later — app and incrementality
 
-- [ ] Copy / cut / paste (multiline)
+- [ ] Copy source: entire buffer as Markdown (clipboard of the rope)
+- [ ] Copy / cut / paste of the selection (multiline)
+- [ ] Read / Edit toggle (Read: no caret/typing, mixed conceal always on; Edit: live loop; `Raw` is Edit-only)
 - [ ] Open / save; title shows name and dirty state
-- [ ] Cache projected lines by (document generation, conceal mode, caret token group); invalidate a range
+- [ ] Cache projected lines by (document generation, conceal policy, caret token group / active line); invalidate a range
 - [ ] Use theme tokens for accents (no hardcoded indigo / sky / emerald)
-- [ ] Status bar: human conceal-mode label, not `{:?}`
+- [ ] Status bar: human conceal/read-edit label, not `{:?}`
 - [ ] Navbar that fits the 640px minimum width without emoji-chip overflow
 
 ## Later docs

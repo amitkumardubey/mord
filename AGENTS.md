@@ -5,7 +5,7 @@ Mord is a single-pane **Word-like live Markdown editor**. The buffer is Markdown
 ## Objective
 
 1. WYSIWYG of the source, not a preview pane. Headings, emphasis, lists, tasks, quotes, and links look like a document.
-2. Conceal/reveal is the product. Markers stay hidden until the caret is on that token (`TokenReveal`), on that line (`LineReveal`), or the user wants raw syntax (`Raw`).
+2. Conceal/reveal is the product. Policy is by span kind, not a global Token vs Line switch: structural prefixes (heading, list, task, quote) reveal for the **line**; inline markers (`**`, `*`, `` ` ``, `~~`, links) reveal by **`group_range`**. `Raw` is the global override that shows source.
 3. Visual text and buffer text are two coordinate systems. Caret, click, Backspace, and Up/Down must map through the same `char_map` the painter uses.
 4. Word-like editing still mutates Markdown (list continuation, task toggles, heading scale). There is no parallel rich-text document.
 5. Stay fast: GPUI + rope, incremental work later — not “reparse the world” forever.
@@ -24,8 +24,8 @@ File I/O and clipboard matter for a finished app. They are not the thesis.
 - **Markdown in the rope is truth.** Visual runs are derived. Never invent a second store of “formatted text.”
 - **Paint and hit-test must agree.** If a glyph is at visual column V, click and caret at V must map to the same buffer column.
 - **Preferred column for Up/Down is visual**, then mapped to the target line — not a raw buffer column (concealed `### ` would jump).
-- **Conceal modes change visibility, not the buffer.**
-- **Token reveal is per-marker `group_range`**, not “any caret on the line” (headings currently violate this).
+- **Conceal changes visibility, not the buffer.**
+- **Structural prefixes reveal for the line**; **inline markers reveal per `group_range`.** Do not use one global Token/Line mode for both. `Raw` still shows everything.
 - **Fenced code is a document span**, not a one-line prefix. Body lines must not run inline conceal.
 
 ## Layout
@@ -52,7 +52,7 @@ A custom parser exists because we need **per-character ranges and token groups**
 Add or extend tests for:
 
 - Inactive heading: visual `My Title` ↔ buffer after `### `
-- Token reveal: only the mark under the caret unhides
+- Heading line: prefix `### ` is visible while the caret is on that line; inline `**` on the same line stays concealed unless the caret is in that token group
 - Click past the visual end → line end, not a panic
 - Up/Down from a concealed heading onto a paragraph keeps visual column
 - Selection is visible and uses the same map as the caret

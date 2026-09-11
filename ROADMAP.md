@@ -47,16 +47,18 @@ Word-like behavior is Markdown in, Markdown out — testable without GPUI.
 - List/task/quote continuation matches the grammar (`* [ ]`, indent included)
 - Task click does not also move the caret; link click vs edit is explicit
 - `VisualRun` carries role (marker / emphasis / code / link / task), not font size; theme owns the type scale (one table, not 1.85 copied three times)
+- Conceal by role: structural prefixes (heading / list / task / quote) reveal for the **line**; inline markers reveal by **token `group_range`**. Drop the global TokenReveal vs LineReveal switch; keep `Raw` as the source overlay
 - Discoverable Bold / Italic / Code; Tab / Shift+Tab indent
 - `EditorView` binds input and paints layout; it does not re-detect prefixes
 
 ## Later — app and incrementality
 
-After the six stages exist.
+After the six stages exist. Clipboard and chrome wait until conceal-by-role is honest, so copy and read mode are not papering over three global modes.
 
-- Clipboard (multiline)
+- Clipboard: **copy source** first (entire rope as Markdown — unambiguous); then copy / cut / paste of the selection
+- Read / Edit toggle: Read is a document (caret hidden, typing off, conceal always on under the mixed policy); Edit is the live loop. `Raw` remains an overlay in Edit, not a third product mode
 - Open / save; title; dirty flag
-- Cache projected lines by (document generation, conceal mode, caret token group); dirty a range
+- Cache projected lines by (document generation, conceal policy, caret token group / active line); dirty a range
 - Theme tokens for accents; human status labels; navbar that fits 640px
 
 ## Docs
