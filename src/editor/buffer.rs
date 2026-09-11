@@ -3,7 +3,7 @@ use ropey::Rope;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextPoint {
     pub row: usize,
-    pub col: usize, // grapheme or char index in line
+    pub col: usize, // Unicode scalar (char) index in line; graphemes are a later concern
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

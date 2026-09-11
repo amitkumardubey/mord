@@ -1,12 +1,18 @@
-use gpui_component::scroll::ScrollableElement;
-use gpui_kit::gpui::*;
 use crate::editor::{
     buffer::DocumentBuffer,
-    decorator::{ConcealMode, Decorator, VisualFontStyle, VisualFontWeight},
-    parser::{BlockKind, MarkdownParser, MarkerType},
+    decorator::{ConcealMode, Decorator},
+    layout::hit_test_line,
+    offset::BufferOffset,
+    parser::{BlockKind, MarkdownParser},
     selection::CursorManager,
 };
+use crate::ui::document_line::{DocumentLine, LineCacheMap};
 use crate::ui::theme::Theme;
+use gpui_kit::gpui::*;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::time::Duration;
 
 pub struct EditorView {
     pub buffer: DocumentBuffer,
@@ -14,6 +20,11 @@ pub struct EditorView {
     pub conceal_mode: ConcealMode,
     pub theme: Theme,
     pub focus_handle: FocusHandle,
+    pub dragging: bool,
+    pub cursor_visible: bool,
+    blink_task: Task<()>,
+    line_caches: LineCacheMap,
+    scroll_handle: ScrollHandle,
 }
 
 impl EditorView {
@@ -40,13 +51,51 @@ Here is some `inline code` and a link to [GPUI Kit](https://gpui-kit.com).
 Type anywhere to see live inline syntax formatting in action!
 "#;
 
-        Self {
+        let focus_handle = cx.focus_handle();
+        let mut view = Self {
             buffer: DocumentBuffer::from_str(sample_text),
             cursor: CursorManager::new(),
             conceal_mode: ConcealMode::TokenReveal,
             theme: Theme::dark(),
-            focus_handle: cx.focus_handle(),
-        }
+            focus_handle: focus_handle.clone(),
+            dragging: false,
+            cursor_visible: true,
+            blink_task: Task::ready(()),
+            line_caches: Rc::new(RefCell::new(HashMap::new())),
+            scroll_handle: ScrollHandle::new(),
+        };
+        view.start_blink(cx);
+        view
+    }
+
+    fn start_blink(&mut self, cx: &mut Context<Self>) {
+        self.cursor_visible = true;
+        self.blink_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(530))
+                    .await;
+                if this
+                    .update(cx, |view, cx| {
+                        view.cursor_visible = !view.cursor_visible;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn reset_blink(&mut self, cx: &mut Context<Self>) {
+        self.cursor_visible = true;
+        self.start_blink(cx);
+    }
+
+    pub fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle, cx);
+        self.reset_blink(cx);
     }
 
     pub fn set_conceal_mode(&mut self, mode: ConcealMode, cx: &mut Context<Self>) {
@@ -63,15 +112,38 @@ Type anywhere to see live inline syntax formatting in action!
         cx.notify();
     }
 
+    fn decorate_row(&self, row: usize) -> crate::editor::DecoratedLine {
+        let raw = self.buffer.line_without_newline(row).unwrap_or_default();
+        let cursor_point = self.buffer.char_offset_to_point(self.cursor.cursor_offset().get());
+        let cursor_col = if row == cursor_point.row {
+            Some(cursor_point.col)
+        } else {
+            None
+        };
+        let parsed = MarkdownParser::parse_line(&raw);
+        Decorator::decorate_line(row, &parsed, cursor_col, self.conceal_mode)
+    }
+
+    fn scroll_caret_into_view(&self) {
+        let row = self
+            .buffer
+            .char_offset_to_point(self.cursor.cursor_offset().get())
+            .row;
+        self.scroll_handle.scroll_to_item(row);
+    }
+
     pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if !self.cursor.selection.is_collapsed() {
             let range = self.cursor.selection.range();
             self.buffer.delete_range(range.start, range.end);
-            self.cursor.set_cursor(range.start);
+            self.cursor.set_cursor(BufferOffset(range.start));
         }
-        let pos = self.cursor.cursor_offset();
+        let pos = self.cursor.cursor_offset().get();
         self.buffer.insert(pos, text);
-        self.cursor.set_cursor(pos + text.chars().count());
+        self.cursor
+            .set_cursor(BufferOffset(pos + text.chars().count()));
+        self.reset_blink(cx);
+        self.scroll_caret_into_view();
         cx.notify();
     }
 
@@ -79,53 +151,66 @@ Type anywhere to see live inline syntax formatting in action!
         if !self.cursor.selection.is_collapsed() {
             let range = self.cursor.selection.range();
             self.buffer.delete_range(range.start, range.end);
-            self.cursor.set_cursor(range.start);
+            self.cursor.set_cursor(BufferOffset(range.start));
+            self.reset_blink(cx);
             cx.notify();
             return;
         }
-        let pos = self.cursor.cursor_offset();
+        let pos = self.cursor.cursor_offset().get();
         if pos == 0 {
             return;
         }
 
         let point = self.buffer.char_offset_to_point(pos);
-        let current_line = self.buffer.line_without_newline(point.row).unwrap_or_default();
+        let current_line = self
+            .buffer
+            .line_without_newline(point.row)
+            .unwrap_or_default();
         let line_start = self.buffer.line_to_char(point.row);
 
-        // If cursor is at the very beginning of a line (point.col == 0)
         if point.col == 0 {
             if point.row > 0 {
-                // Merge with previous line, landing exactly at the end of the previous line!
-                let prev_line = self.buffer.line_without_newline(point.row - 1).unwrap_or_default();
+                let prev_line = self
+                    .buffer
+                    .line_without_newline(point.row - 1)
+                    .unwrap_or_default();
                 let prev_line_start = self.buffer.line_to_char(point.row - 1);
                 let prev_line_len = prev_line.chars().count();
                 let join_point = prev_line_start + prev_line_len;
 
                 self.buffer.delete_range(join_point, line_start);
-                self.cursor.set_cursor(join_point);
+                self.cursor.set_cursor(BufferOffset(join_point));
+                self.reset_blink(cx);
                 cx.notify();
             }
             return;
         }
 
-        let indent_len = current_line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+        let indent_len = current_line
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .count();
         if point.col > 0 && point.col <= indent_len {
-            // Unindent: delete up to 4 spaces or 1 tab
             let delete_count = if current_line[..point.col].ends_with("    ") {
                 4
             } else {
                 1
             };
             self.buffer.delete_range(pos - delete_count, pos);
-            self.cursor.set_cursor(pos - delete_count);
+            self.cursor.set_cursor(BufferOffset(pos - delete_count));
+            self.reset_blink(cx);
             cx.notify();
             return;
         }
 
         let after_indent = &current_line[indent_len..];
-        let prefix_len = if after_indent.starts_with("- [ ] ") || after_indent.starts_with("- [x] ") {
+        let prefix_len = if after_indent.starts_with("- [ ] ") || after_indent.starts_with("- [x] ")
+        {
             Some(indent_len + 6)
-        } else if after_indent.starts_with("- ") || after_indent.starts_with("* ") || after_indent.starts_with("> ") {
+        } else if after_indent.starts_with("- ")
+            || after_indent.starts_with("* ")
+            || after_indent.starts_with("> ")
+        {
             Some(indent_len + 2)
         } else {
             let digits = after_indent.chars().take_while(|c| c.is_ascii_digit()).count();
@@ -145,17 +230,17 @@ Type anywhere to see live inline syntax formatting in action!
 
         if let Some(plen) = prefix_len {
             if point.col <= plen {
-                // Backspacing inside or right after prefix removes the prefix, converting line to plain text
                 self.buffer.delete_range(line_start, line_start + plen);
-                self.cursor.set_cursor(line_start);
+                self.cursor.set_cursor(BufferOffset(line_start));
+                self.reset_blink(cx);
                 cx.notify();
                 return;
             }
         }
 
-        // Normal single-character backspace
         self.buffer.delete_range(pos - 1, pos);
-        self.cursor.set_cursor(pos - 1);
+        self.cursor.set_cursor(BufferOffset(pos - 1));
+        self.reset_blink(cx);
         cx.notify();
     }
 
@@ -163,23 +248,33 @@ Type anywhere to see live inline syntax formatting in action!
         if !self.cursor.selection.is_collapsed() {
             let range = self.cursor.selection.range();
             self.buffer.delete_range(range.start, range.end);
-            self.cursor.set_cursor(range.start);
+            self.cursor.set_cursor(BufferOffset(range.start));
+            self.reset_blink(cx);
             cx.notify();
             return;
         }
-        let pos = self.cursor.cursor_offset();
+        let pos = self.cursor.cursor_offset().get();
         if pos < self.buffer.len_chars() {
             self.buffer.delete_range(pos, pos + 1);
+            self.reset_blink(cx);
             cx.notify();
         }
     }
 
     pub fn insert_newline(&mut self, cx: &mut Context<Self>) {
-        let point = self.buffer.char_offset_to_point(self.cursor.cursor_offset());
-        let current_line = self.buffer.line_without_newline(point.row).unwrap_or_default();
+        let point = self
+            .buffer
+            .char_offset_to_point(self.cursor.cursor_offset().get());
+        let current_line = self
+            .buffer
+            .line_without_newline(point.row)
+            .unwrap_or_default();
         let line_start = self.buffer.line_to_char(point.row);
-        
-        let indent_len = current_line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+
+        let indent_len = current_line
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .count();
         let indent_str: String = current_line.chars().take(indent_len).collect();
         let after_indent = &current_line[indent_len..];
 
@@ -188,19 +283,21 @@ Type anywhere to see live inline syntax formatting in action!
             let num: usize = after_indent[..digits].parse().unwrap_or(1);
             let item_text = after_indent[digits + 2..].trim();
             if item_text.is_empty() {
-                // Pressing enter on empty numbered item: clear prefix and exit list
-                self.buffer.replace_range(line_start, self.cursor.cursor_offset(), "");
-                self.cursor.set_cursor(line_start);
+                self.buffer
+                    .replace_range(line_start, self.cursor.cursor_offset().get(), "");
+                self.cursor.set_cursor(BufferOffset(line_start));
+                self.reset_blink(cx);
                 cx.notify();
                 return;
             }
-            // Auto-increment numbered list!
             format!("{}{}. ", indent_str, num + 1)
         } else if after_indent.starts_with("- [ ] ") || after_indent.starts_with("- [x] ") {
             let item_text = after_indent[6..].trim();
             if item_text.is_empty() {
-                self.buffer.replace_range(line_start, self.cursor.cursor_offset(), "");
-                self.cursor.set_cursor(line_start);
+                self.buffer
+                    .replace_range(line_start, self.cursor.cursor_offset().get(), "");
+                self.cursor.set_cursor(BufferOffset(line_start));
+                self.reset_blink(cx);
                 cx.notify();
                 return;
             }
@@ -208,8 +305,10 @@ Type anywhere to see live inline syntax formatting in action!
         } else if after_indent.starts_with("- ") || after_indent.starts_with("* ") {
             let item_text = after_indent[2..].trim();
             if item_text.is_empty() {
-                self.buffer.replace_range(line_start, self.cursor.cursor_offset(), "");
-                self.cursor.set_cursor(line_start);
+                self.buffer
+                    .replace_range(line_start, self.cursor.cursor_offset().get(), "");
+                self.cursor.set_cursor(BufferOffset(line_start));
+                self.reset_blink(cx);
                 cx.notify();
                 return;
             }
@@ -217,8 +316,10 @@ Type anywhere to see live inline syntax formatting in action!
         } else if after_indent.starts_with("> ") {
             let item_text = after_indent[2..].trim();
             if item_text.is_empty() {
-                self.buffer.replace_range(line_start, self.cursor.cursor_offset(), "");
-                self.cursor.set_cursor(line_start);
+                self.buffer
+                    .replace_range(line_start, self.cursor.cursor_offset().get(), "");
+                self.cursor.set_cursor(BufferOffset(line_start));
+                self.reset_blink(cx);
                 cx.notify();
                 return;
             }
@@ -234,42 +335,51 @@ Type anywhere to see live inline syntax formatting in action!
     pub fn toggle_bold(&mut self, cx: &mut Context<Self>) {
         if self.cursor.selection.is_collapsed() {
             self.insert_text("****", cx);
-            self.cursor.set_cursor(self.cursor.cursor_offset() - 2);
+            self.cursor
+                .set_cursor(self.cursor.cursor_offset() - 2);
         } else {
             let range = self.cursor.selection.range();
             let selected = self.buffer.slice_to_string(range.start, range.end);
             let wrapped = format!("**{}**", selected);
             self.buffer.replace_range(range.start, range.end, &wrapped);
-            self.cursor.set_cursor(range.start + wrapped.chars().count());
+            self.cursor
+                .set_cursor(BufferOffset(range.start + wrapped.chars().count()));
         }
+        self.reset_blink(cx);
         cx.notify();
     }
 
     pub fn toggle_italic(&mut self, cx: &mut Context<Self>) {
         if self.cursor.selection.is_collapsed() {
             self.insert_text("**", cx);
-            self.cursor.set_cursor(self.cursor.cursor_offset() - 1);
+            self.cursor
+                .set_cursor(self.cursor.cursor_offset() - 1);
         } else {
             let range = self.cursor.selection.range();
             let selected = self.buffer.slice_to_string(range.start, range.end);
             let wrapped = format!("*{}*", selected);
             self.buffer.replace_range(range.start, range.end, &wrapped);
-            self.cursor.set_cursor(range.start + wrapped.chars().count());
+            self.cursor
+                .set_cursor(BufferOffset(range.start + wrapped.chars().count()));
         }
+        self.reset_blink(cx);
         cx.notify();
     }
 
     pub fn toggle_code(&mut self, cx: &mut Context<Self>) {
         if self.cursor.selection.is_collapsed() {
             self.insert_text("``", cx);
-            self.cursor.set_cursor(self.cursor.cursor_offset() - 1);
+            self.cursor
+                .set_cursor(self.cursor.cursor_offset() - 1);
         } else {
             let range = self.cursor.selection.range();
             let selected = self.buffer.slice_to_string(range.start, range.end);
             let wrapped = format!("`{}`", selected);
             self.buffer.replace_range(range.start, range.end, &wrapped);
-            self.cursor.set_cursor(range.start + wrapped.chars().count());
+            self.cursor
+                .set_cursor(BufferOffset(range.start + wrapped.chars().count()));
         }
+        self.reset_blink(cx);
         cx.notify();
     }
 
@@ -278,22 +388,58 @@ Type anywhere to see live inline syntax formatting in action!
             let line_start = self.buffer.line_to_char(line_idx);
             if line.starts_with("- [ ] ") {
                 let replaced = format!("- [x] {}", &line[6..]);
-                self.buffer.replace_range(line_start, line_start + line.chars().count(), &replaced);
+                self.buffer.replace_range(
+                    line_start,
+                    line_start + line.chars().count(),
+                    &replaced,
+                );
             } else if line.starts_with("- [x] ") || line.starts_with("- [X] ") {
                 let replaced = format!("- [ ] {}", &line[6..]);
-                self.buffer.replace_range(line_start, line_start + line.chars().count(), &replaced);
+                self.buffer.replace_range(
+                    line_start,
+                    line_start + line.chars().count(),
+                    &replaced,
+                );
             }
             cx.notify();
         }
     }
 
     pub fn word_count(&self) -> usize {
-        let text = self.buffer.text();
-        text.split_whitespace().count()
+        self.buffer.text().split_whitespace().count()
     }
 
     pub fn char_count(&self) -> usize {
         self.buffer.len_chars()
+    }
+
+    fn hit_test_at(
+        &self,
+        window: &mut Window,
+        line_idx: usize,
+        position: Point<Pixels>,
+    ) -> Option<(BufferOffset, bool)> {
+        let cache = self.line_caches.borrow().get(&line_idx).cloned()?;
+        if position.y < cache.bounds.top() || position.y > cache.bounds.bottom() {
+            // Still allow x hit within vertically nearby clicks on this row handler
+        }
+        let local_x = position.x - cache.bounds.left();
+        let decorated = self.decorate_row(line_idx);
+        // Prefer reshaping for accuracy if cache display matches
+        let paint = self.theme.paint_theme();
+        let input = crate::editor::layout::build_shaped_line_input(
+            &decorated,
+            &paint,
+            window.text_style().font(),
+            true,
+        );
+        let shaped = window
+            .text_system()
+            .shape_line(input.text, input.font_size, &input.runs, None);
+        let hit = hit_test_line(&shaped, &decorated, cache.line_len, local_x);
+        let line_start = self.buffer.line_to_char(line_idx);
+        let offset = BufferOffset((line_start + hit.buffer_col.get()).min(line_start + cache.line_len));
+        Some((offset, hit.on_task_marker))
     }
 
     pub fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -305,20 +451,21 @@ Type anywhere to see live inline syntax formatting in action!
                 "z" | "Z" => {
                     if modifiers.shift {
                         if let Some(pos) = self.buffer.redo() {
-                            self.cursor.set_cursor(pos);
+                            self.cursor.set_cursor(BufferOffset(pos));
+                            self.reset_blink(cx);
                             cx.notify();
                         }
-                    } else {
-                        if let Some(pos) = self.buffer.undo() {
-                            self.cursor.set_cursor(pos);
-                            cx.notify();
-                        }
+                    } else if let Some(pos) = self.buffer.undo() {
+                        self.cursor.set_cursor(BufferOffset(pos));
+                        self.reset_blink(cx);
+                        cx.notify();
                     }
                     return;
                 }
                 "y" | "Y" => {
                     if let Some(pos) = self.buffer.redo() {
-                        self.cursor.set_cursor(pos);
+                        self.cursor.set_cursor(BufferOffset(pos));
+                        self.reset_blink(cx);
                         cx.notify();
                     }
                     return;
@@ -350,26 +497,58 @@ Type anywhere to see live inline syntax formatting in action!
             "enter" => self.insert_newline(cx),
             "left" => {
                 self.cursor.move_left(&self.buffer, modifiers.shift);
+                self.reset_blink(cx);
+                self.scroll_caret_into_view();
                 cx.notify();
             }
             "right" => {
                 self.cursor.move_right(&self.buffer, modifiers.shift);
+                self.reset_blink(cx);
+                self.scroll_caret_into_view();
                 cx.notify();
             }
             "up" => {
-                self.cursor.move_up(&self.buffer, modifiers.shift);
+                let point = self
+                    .buffer
+                    .char_offset_to_point(self.cursor.cursor_offset().get());
+                if point.row > 0 {
+                    let current = self.decorate_row(point.row);
+                    let target = self.decorate_row(point.row - 1);
+                    self.cursor
+                        .move_up(&self.buffer, &current, &target, modifiers.shift);
+                } else {
+                    self.cursor.set_head(BufferOffset(0), modifiers.shift);
+                }
+                self.reset_blink(cx);
+                self.scroll_caret_into_view();
                 cx.notify();
             }
             "down" => {
-                self.cursor.move_down(&self.buffer, modifiers.shift);
+                let point = self
+                    .buffer
+                    .char_offset_to_point(self.cursor.cursor_offset().get());
+                let max_line = self.buffer.len_lines().saturating_sub(1);
+                if point.row < max_line {
+                    let current = self.decorate_row(point.row);
+                    let target = self.decorate_row(point.row + 1);
+                    self.cursor
+                        .move_down(&self.buffer, &current, &target, modifiers.shift);
+                } else {
+                    self.cursor
+                        .set_head(BufferOffset(self.buffer.len_chars()), modifiers.shift);
+                }
+                self.reset_blink(cx);
+                self.scroll_caret_into_view();
                 cx.notify();
             }
             "home" => {
                 self.cursor.move_to_line_start(&self.buffer, modifiers.shift);
+                self.reset_blink(cx);
                 cx.notify();
             }
             "end" => {
                 self.cursor.move_to_line_end(&self.buffer, modifiers.shift);
+                self.reset_blink(cx);
                 cx.notify();
             }
             "tab" => {
@@ -380,7 +559,11 @@ Type anywhere to see live inline syntax formatting in action!
                     if !modifiers.control && !modifiers.platform && !modifiers.alt {
                         self.insert_text(ch, cx);
                     }
-                } else if key.chars().count() == 1 && !modifiers.control && !modifiers.platform && !modifiers.alt {
+                } else if key.chars().count() == 1
+                    && !modifiers.control
+                    && !modifiers.platform
+                    && !modifiers.alt
+                {
                     self.insert_text(key, cx);
                 }
             }
@@ -388,11 +571,20 @@ Type anywhere to see live inline syntax formatting in action!
     }
 }
 
+impl Focusable for EditorView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl Render for EditorView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let cursor_point = self.buffer.char_offset_to_point(self.cursor.cursor_offset());
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let cursor_point = self
+            .buffer
+            .char_offset_to_point(self.cursor.cursor_offset().get());
         let current_row = cursor_point.row;
         let theme = &self.theme;
+        let paint_theme = theme.paint_theme();
 
         let bg_app = rgb(theme.bg_app);
         let bg_editor = rgb(theme.bg_editor);
@@ -404,8 +596,17 @@ impl Render for EditorView {
         let total_lines = self.buffer.len_lines();
         let word_count = self.word_count();
         let char_count = self.char_count();
+        let sel_range = if self.cursor.selection.is_collapsed() {
+            None
+        } else {
+            Some(self.cursor.selection.range())
+        };
+        let caret_visible = self.cursor_visible && self.focus_handle.is_focused(window);
+        let line_caches = self.line_caches.clone();
 
-        // 1. Top Navbar / Toolbar
+        // Clear stale caches each frame; paint will refill.
+        line_caches.borrow_mut().clear();
+
         let navbar = div()
             .flex()
             .items_center()
@@ -460,71 +661,55 @@ impl Render for EditorView {
                     .bg(rgb(theme.bg_code_inline))
                     .gap_1()
                     .child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .bg(if self.conceal_mode == ConcealMode::TokenReveal { rgb(0x4F46E5) } else { rgb(theme.bg_code_inline) })
-                            .text_color(if self.conceal_mode == ConcealMode::TokenReveal { rgb(0xFFFFFF) } else { text_muted })
-                            .font_weight(FontWeight::MEDIUM)
-                            .on_mouse_down(MouseButton::Left, cx.listener(|view, _, _, cx| {
-                                view.set_conceal_mode(ConcealMode::TokenReveal, cx);
-                            }))
-                            .child("🎯 Token Reveal"),
+                        mode_chip("Token", self.conceal_mode == ConcealMode::TokenReveal, theme)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _, _, cx| {
+                                    view.set_conceal_mode(ConcealMode::TokenReveal, cx);
+                                }),
+                            ),
                     )
                     .child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .bg(if self.conceal_mode == ConcealMode::LineReveal { rgb(0x4F46E5) } else { rgb(theme.bg_code_inline) })
-                            .text_color(if self.conceal_mode == ConcealMode::LineReveal { rgb(0xFFFFFF) } else { text_muted })
-                            .font_weight(FontWeight::MEDIUM)
-                            .on_mouse_down(MouseButton::Left, cx.listener(|view, _, _, cx| {
-                                view.set_conceal_mode(ConcealMode::LineReveal, cx);
-                            }))
-                            .child("⚡ Line Reveal"),
+                        mode_chip("Line", self.conceal_mode == ConcealMode::LineReveal, theme)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _, _, cx| {
+                                    view.set_conceal_mode(ConcealMode::LineReveal, cx);
+                                }),
+                            ),
                     )
                     .child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .bg(if self.conceal_mode == ConcealMode::Raw { rgb(0x4F46E5) } else { rgb(theme.bg_code_inline) })
-                            .text_color(if self.conceal_mode == ConcealMode::Raw { rgb(0xFFFFFF) } else { text_muted })
-                            .font_weight(FontWeight::MEDIUM)
-                            .on_mouse_down(MouseButton::Left, cx.listener(|view, _, _, cx| {
-                                view.set_conceal_mode(ConcealMode::Raw, cx);
-                            }))
-                            .child("📝 Raw Markdown"),
+                        mode_chip("Raw", self.conceal_mode == ConcealMode::Raw, theme)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _, _, cx| {
+                                    view.set_conceal_mode(ConcealMode::Raw, cx);
+                                }),
+                            ),
                     ),
             )
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(border_color)
-                            .cursor_pointer()
-                            .text_color(text_primary)
-                            .on_mouse_down(MouseButton::Left, cx.listener(|view, _, _, cx| {
-                                view.toggle_theme(cx);
-                            }))
-                            .child(if theme.bg_editor == 0x121214 { "☀️ Light" } else { "🌙 Dark" }),
-                    ),
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border_color)
+                    .cursor_pointer()
+                    .text_color(text_primary)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _, cx| view.toggle_theme(cx)),
+                    )
+                    .child(if theme.bg_editor == 0x121214 {
+                        "Light"
+                    } else {
+                        "Dark"
+                    }),
             );
 
-        // 2. Editor Document Content
         let mut document_lines = div()
+            .id("document-lines")
             .flex()
             .flex_col()
             .w_full()
@@ -539,246 +724,122 @@ impl Render for EditorView {
         for row in 0..total_lines {
             let raw_line = self.buffer.line_without_newline(row).unwrap_or_default();
             let is_active = row == current_row;
-            let cursor_col = if is_active { Some(cursor_point.col) } else { None };
-            let parsed = MarkdownParser::parse_line(&raw_line);
-            let block_kind = parsed.block_kind.clone();
-            let decorated = Decorator::decorate_line(row, &parsed, cursor_col, self.conceal_mode);
-            let decorated_for_click = decorated.clone();
+            let decorated = self.decorate_row(row);
             let line_start = self.buffer.line_to_char(row);
             let line_len = raw_line.chars().count();
-            let block_kind_for_click = block_kind.clone();
+            let block_kind = decorated.block_kind.clone();
+
+            let caret_visual = if is_active {
+                Some(crate::editor::offset::VisualCol(
+                    Decorator::buffer_col_to_visual_col(&decorated, cursor_point.col),
+                ))
+            } else {
+                None
+            };
 
             let mut line_row = div()
+                .id(("line", row))
                 .flex()
-                .items_center()
+                .items_start()
                 .w_full()
                 .py_1()
                 .px_2()
                 .rounded_md()
                 .cursor_text()
-                .on_mouse_down(MouseButton::Left, cx.listener(move |view, event: &MouseDownEvent, window, cx| {
-                    let win_width = window.viewport_size().width;
-                    let doc_max_w = px(860.0);
-                    let doc_pad = px(32.0);
-                    let doc_left = if win_width > doc_max_w + px(64.0) {
-                        (win_width - doc_max_w) / 2.0
-                    } else {
-                        doc_pad
-                    };
-                    
-                    let quote_offset = if matches!(block_kind_for_click, BlockKind::Blockquote { .. }) { 16.0 } else { 0.0 };
-                    let text_start_x = doc_left + px(72.0 + quote_offset);
-                    let click_x = event.position.x;
-                    let delta_x: f32 = (click_x - text_start_x).into();
-
-                    if delta_x <= 0.0 {
-                        view.cursor.set_cursor(line_start);
-                    } else {
-                        let font_scale = match block_kind_for_click {
-                            BlockKind::Heading { level } => match level {
-                                1 => 1.85,
-                                2 => 1.55,
-                                3 => 1.30,
-                                _ => 1.0,
-                            },
-                            _ => 1.0,
-                        };
-
-                        let mut current_x: f32 = 0.0;
-                        let mut est_visual_col = decorated_for_click.display_text.chars().count();
-                        for (idx, ch) in decorated_for_click.display_text.chars().enumerate() {
-                            let base_w = match ch {
-                                'i' | 'l' | 'j' | 't' | 'r' | 'f' | 'I' | '\'' | '"' | '!' | ':' | ';' | '.' | ',' | ' ' | '|' => 5.0,
-                                'm' | 'w' | 'M' | 'W' | '@' | '%' | '&' => 12.5,
-                                _ => 8.5,
-                            };
-                            let w = base_w * font_scale;
-                            if delta_x < current_x + (w * 0.55) {
-                                est_visual_col = idx;
-                                break;
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                        view.focus_editor(window, cx);
+                        if let Some((offset, on_task)) =
+                            view.hit_test_at(window, row, event.position)
+                        {
+                            if on_task && !event.modifiers.shift {
+                                view.toggle_task_at_line(row, cx);
+                                return;
                             }
-                            current_x += w;
+                            view.dragging = true;
+                            view.cursor
+                                .set_head(offset, event.modifiers.shift);
+                            view.reset_blink(cx);
+                            cx.notify();
                         }
-
-                        let buf_col = Decorator::visual_col_to_buffer_col(&decorated_for_click, est_visual_col, line_len);
-                        let target = (line_start + buf_col).min(line_start + line_len);
-                        view.cursor.set_cursor(target);
+                    }),
+                )
+                .on_mouse_move(cx.listener(move |view, event: &MouseMoveEvent, window, cx| {
+                    if view.dragging {
+                        if let Some((offset, _)) = view.hit_test_at(window, row, event.position) {
+                            view.cursor.set_head(offset, true);
+                            view.reset_blink(cx);
+                            cx.notify();
+                        }
                     }
-                    cx.notify();
-                }));
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|view, _: &MouseUpEvent, _, cx| {
+                        view.dragging = false;
+                        cx.notify();
+                    }),
+                );
 
             if is_active {
                 line_row = line_row.bg(bg_active_line);
             }
 
-            // Gutter Line Number
             line_row = line_row.child(
                 div()
                     .w_8()
+                    .pt_1()
                     .text_xs()
-                    .text_color(if is_active { rgb(theme.text_accent) } else { rgb(theme.text_muted) })
-                    .font_weight(if is_active { FontWeight::BOLD } else { FontWeight::NORMAL })
+                    .text_color(if is_active {
+                        rgb(theme.text_accent)
+                    } else {
+                        rgb(theme.text_muted)
+                    })
+                    .font_weight(if is_active {
+                        FontWeight::BOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
                     .child(format!("{}", row + 1)),
             );
 
-            // Blockquote left accent bar
-            if matches!(parsed.block_kind, BlockKind::Blockquote { .. }) {
+            if matches!(block_kind, BlockKind::Blockquote { .. }) {
                 line_row = line_row.child(
                     div()
                         .w_1()
                         .h_full()
+                        .min_h(px(20.0))
                         .bg(rgb(theme.border_quote))
                         .rounded_full()
                         .mr_3(),
                 );
             }
 
-            // Calculate visual column for inline caret insertion
-            let target_visual_col = if is_active {
-                Decorator::buffer_col_to_visual_col(&decorated, cursor_point.col)
-            } else {
-                usize::MAX
-            };
+            line_row = line_row.child(
+                div().flex_1().min_w_0().child(DocumentLine {
+                    line_index: row,
+                    decorated,
+                    line_len,
+                    line_start,
+                    paint_theme,
+                    is_active,
+                    caret_visual_col: caret_visual,
+                    caret_visible: caret_visible && is_active,
+                    selection: sel_range.clone(),
+                    line_caches: line_caches.clone(),
+                }),
+            );
 
-            // Line Runs Container
-            let mut runs_container = div()
-                .flex()
-                .items_center()
-                .flex_wrap()
-                .text_color(text_primary);
-
-            let mut caret_rendered = false;
-            let mut current_visual_offset = 0;
-
-            let line_scale = match block_kind {
-                BlockKind::Heading { level } => match level {
-                    1 => 1.85,
-                    2 => 1.55,
-                    3 => 1.30,
-                    _ => 1.0,
-                },
-                _ => 1.0,
-            };
-
-            if decorated.visual_runs.is_empty() {
-                if is_active {
-                    runs_container = runs_container.child(
-                        div()
-                            .w(px(2.0))
-                            .h(px(20.0 * line_scale))
-                            .bg(rgb(theme.cursor_color))
-                            .rounded_full(),
-                    );
-                    caret_rendered = true;
-                } else {
-                    runs_container = runs_container.child(div().child(" "));
-                }
-            }
-
-            for run in &decorated.visual_runs {
-                let run_len = run.text.chars().count();
-                let run_end = current_visual_offset + run_len;
-
-                // Check if caret lands inside this run
-                let should_split_for_caret = is_active 
-                    && !caret_rendered 
-                    && target_visual_col >= current_visual_offset 
-                    && target_visual_col <= run_end;
-
-                let apply_styles = |mut d: Div| -> Div {
-                    match run.font_weight {
-                        VisualFontWeight::Bold => d = d.font_weight(FontWeight::BOLD),
-                        VisualFontWeight::ExtraBold => d = d.font_weight(FontWeight::EXTRA_BOLD),
-                        VisualFontWeight::Normal => {}
-                    }
-                    if run.font_style == VisualFontStyle::Italic {
-                        d = d.italic();
-                    }
-                    if run.font_size_scale > 1.4 {
-                        d = d.text_xl().text_color(rgb(theme.text_heading));
-                    } else if run.font_size_scale > 1.2 {
-                        d = d.text_lg().text_color(rgb(theme.text_heading));
-                    }
-                    if run.is_marker {
-                        if is_active {
-                            d = d.text_color(rgb(theme.text_marker_active)).font_weight(FontWeight::MEDIUM);
-                        } else {
-                            d = d.text_color(rgb(theme.text_marker_dimmed));
-                        }
-                    }
-                    if run.is_code {
-                        d = d
-                            .bg(rgb(theme.bg_code_inline))
-                            .px_2()
-                            .py_0p5()
-                            .rounded_md()
-                            .text_sm()
-                            .text_color(rgb(0x38BDF8));
-                    }
-                    if run.link_url.is_some() {
-                        d = d.text_color(rgb(theme.text_link)).underline();
-                    }
-                    d
-                };
-
-                if should_split_for_caret {
-                    let split_idx = target_visual_col - current_visual_offset;
-                    let before_str: String = run.text.chars().take(split_idx).collect();
-                    let after_str: String = run.text.chars().skip(split_idx).collect();
-
-                    if !before_str.is_empty() {
-                        runs_container = runs_container.child(apply_styles(div().child(before_str)));
-                    }
-
-                    // Insert Caret at exact position
-                    runs_container = runs_container.child(
-                        div()
-                            .w(px(2.0))
-                            .h(px(20.0 * run.font_size_scale))
-                            .bg(rgb(theme.cursor_color))
-                            .rounded_full(),
-                    );
-                    caret_rendered = true;
-
-                    if !after_str.is_empty() {
-                        runs_container = runs_container.child(apply_styles(div().child(after_str)));
-                    }
-                } else {
-                    let mut run_div = apply_styles(div().child(run.text.clone()));
-
-                    if let Some(MarkerType::TaskListMarker { checked }) = run.marker_type {
-                        run_div = run_div
-                            .cursor_pointer()
-                            .font_weight(FontWeight::BOLD)
-                            .on_mouse_down(MouseButton::Left, cx.listener(move |view, _, _, cx| {
-                                view.toggle_task_at_line(row, cx);
-                            }));
-                        if checked {
-                            run_div = run_div.text_color(rgb(0x34D399));
-                        }
-                    }
-                    runs_container = runs_container.child(run_div);
-                }
-
-                current_visual_offset = run_end;
-            }
-
-            // If caret has not yet been rendered on active line (e.g. at the very end of line)
-            if is_active && !caret_rendered {
-                runs_container = runs_container.child(
-                    div()
-                        .w(px(2.0))
-                        .h(px(20.0 * line_scale))
-                        .bg(rgb(theme.cursor_color))
-                        .rounded_full(),
-                );
-            }
-
-            line_row = line_row.child(runs_container);
             document_lines = document_lines.child(line_row);
         }
 
-        // 3. Status Bar (Bottom)
+        let mode_label = match self.conceal_mode {
+            ConcealMode::TokenReveal => "Token Reveal",
+            ConcealMode::LineReveal => "Line Reveal",
+            ConcealMode::Raw => "Raw",
+        };
+
         let status_bar = div()
             .flex()
             .items_center()
@@ -794,13 +855,14 @@ impl Render for EditorView {
                 div()
                     .flex()
                     .gap_4()
-                    .child(format!("Ln {}, Col {}", cursor_point.row + 1, cursor_point.col + 1))
+                    .child(format!(
+                        "Ln {}, Col {}",
+                        cursor_point.row + 1,
+                        cursor_point.col + 1
+                    ))
                     .child(format!("{} lines", total_lines)),
             )
-            .child(
-                div()
-                    .child(format!("Mode: {:?}", self.conceal_mode)),
-            )
+            .child(div().child(format!("Mode: {}", mode_label)))
             .child(
                 div()
                     .flex()
@@ -809,13 +871,18 @@ impl Render for EditorView {
                     .child(format!("{} characters", char_count)),
             );
 
-        // Assemble root view container with keyboard event capturing
         div()
             .track_focus(&self.focus_handle)
             .key_context("MordEditor")
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
                 view.handle_key_down(event, cx);
             }))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseUpEvent, _, _cx| {
+                    view.dragging = false;
+                }),
+            )
             .flex()
             .flex_col()
             .w_full()
@@ -824,13 +891,36 @@ impl Render for EditorView {
             .child(navbar)
             .child(
                 div()
+                    .id("editor-scroll")
                     .flex()
                     .flex_1()
-                    .overflow_y_scrollbar()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll_handle)
                     .justify_center()
                     .p_8()
                     .child(document_lines),
             )
             .child(status_bar)
     }
+}
+
+fn mode_chip(label: &'static str, active: bool, theme: &Theme) -> Div {
+    div()
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .cursor_pointer()
+        .bg(if active {
+            rgb(0x4F46E5)
+        } else {
+            rgb(theme.bg_code_inline)
+        })
+        .text_color(if active {
+            rgb(0xFFFFFF)
+        } else {
+            rgb(theme.text_muted)
+        })
+        .font_weight(FontWeight::MEDIUM)
+        .child(label)
 }

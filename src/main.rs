@@ -28,6 +28,9 @@ fn main() {
 
         cx.open_window(options, |window, cx| {
             let editor_view = cx.new(|cx| EditorView::new(cx));
+            editor_view.update(cx, |view, cx| {
+                view.focus_editor(window, cx);
+            });
             cx.new(|cx| Root::new(editor_view, window, cx))
         })
         .expect("Failed to open main Mord window");

@@ -1,3 +1,4 @@
+pub mod document_line;
 pub mod editor_view;
 pub mod theme;
 

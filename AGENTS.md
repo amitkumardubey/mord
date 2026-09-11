@@ -31,10 +31,13 @@ File I/O and clipboard matter for a finished app. They are not the thesis.
 ## Layout
 
 - `src/editor/buffer.rs` — rope, undo (char offsets, not bytes)
-- `src/editor/selection.rs` — caret + selection
+- `src/editor/offset.rs` — `BufferOffset` / `BufferCol` / `VisualCol` newtypes
+- `src/editor/selection.rs` — caret + selection; Up/Down preferred column is visual
 - `src/editor/parser.rs` — line/document parse → spans with `char_range` + `group_range`
 - `src/editor/decorator.rs` — spans + conceal + caret → visual runs + `char_map`
-- `src/ui/editor_view.rs` — input, commands, GPUI paint (too large; split when touching it)
+- `src/editor/layout.rs` — visual runs → GPUI `TextRun`s; byte ↔ visual mapping
+- `src/ui/document_line.rs` — shaped-line paint, overlay caret, selection quads
+- `src/ui/editor_view.rs` — input, commands, chrome (keep paint logic in `document_line`)
 - `src/ui/theme.rs` — colors and type scale; paint must use it
 
 Prefix grammar (list, task, heading, quote) must live in **one** place. Parser, decorator, Enter, Backspace, and task toggle must not each re-detect syntax.

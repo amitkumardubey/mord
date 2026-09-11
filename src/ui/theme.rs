@@ -1,3 +1,5 @@
+use crate::editor::layout::LinePaintTheme;
+
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub bg_app: u32,
@@ -66,6 +68,23 @@ impl Theme {
             cursor_color: 0x2563EB,
             font_size_base: 16.0,
             line_height_base: 26.0,
+        }
+    }
+
+    pub fn paint_theme(&self) -> LinePaintTheme {
+        LinePaintTheme {
+            text_primary: self.text_primary,
+            text_heading: self.text_heading,
+            text_marker_dimmed: self.text_marker_dimmed,
+            text_marker_active: self.text_marker_active,
+            text_link: self.text_link,
+            bg_code_inline: self.bg_code_inline,
+            bg_selection: self.bg_selection,
+            cursor_color: self.cursor_color,
+            code_accent: 0x38BDF8,
+            task_checked: 0x34D399,
+            font_size_base: self.font_size_base,
+            line_height_base: self.line_height_base,
         }
     }
 }

@@ -39,4 +39,4 @@ Requires a GPU-capable environment (GPUI).
 - [ROADMAP.md](ROADMAP.md) — milestones
 - [TODO.md](TODO.md) — current work list
 
-`ARCHITECTURE.md` will be added once the engine (parse → decorate → map → paint) is stable enough to document as a contract.
+`ARCHITECTURE.md` will be added once Buffer → Parse → Project → Layout → Commands → View is stable enough to document as a contract. See [ROADMAP.md](ROADMAP.md).
