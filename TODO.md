@@ -58,16 +58,43 @@ Edit log:
 - [x] Tab / Shift+Tab indent and outdent the line or selection
 - [x] `EditorView` only binds input and paints layout (no prefix re-detection)
 
+## Word-like Live (agreed, not built)
+
+- [ ] Live hides closed marks (no click-to-reveal `**` / hashes); incomplete syntax may show while typing
+- [ ] Raw is source + light syntax color (no type scale, no glyph substitutes); mapping is 1:1
+- [ ] Sticky Bold/Italic: collapsed caret arms typing on this line until Enter, toggle, or caret leaves; no empty `****`
+- [ ] Select-then-format wrap/unwrap; Ctrl/Cmd-B/I match toolbar; Code is selection-only (Ctrl/Cmd-E)
+- [ ] Shortcuts: Ctrl/Cmd-1…6 headings; K link; Shift+X strikethrough; Shift+R Live/Raw; Shift+E Read/Edit; Shift+C copy source; S save; C/X/V clipboard when those exist
+
+- [ ] Heading level control (Live does not show `### `)
+- [ ] Link popover; image popover (`![alt](src)`)
+- [ ] Toolbar icons from one icon set (not emoji)
+
 ## Later — app and incrementality
 
 - [ ] Copy source: entire buffer as Markdown (clipboard of the rope)
 - [ ] Copy / cut / paste of the selection (multiline)
-- [ ] Read / Edit toggle (Read: no caret/typing, mixed conceal always on; Edit: live loop; `Raw` is Edit-only)
-- [ ] Open / save; title shows name and dirty state
-- [ ] Cache projected lines by (document generation, conceal policy, caret token group / active line); invalidate a range
-- [ ] Use theme tokens for accents (no hardcoded indigo / sky / emerald)
+- [ ] Read / Edit toggle (Read: no caret/typing, Live always on; Edit: live loop; Raw is Edit-only source)
+- [ ] Open / save Markdown (`.md`); optional `.txt` as Markdown; title shows name and dirty state
+- [ ] Export PDF and `.docx` one-way from the rope (no Word/HTML import)
+- [ ] Cache projected lines by (document generation, Live vs Raw, caret); invalidate a range
+- [ ] Use theme tokens for accents and chrome (no hardcoded indigo / sky / emerald in view or layout)
+- [ ] Raw syntax colors live on `Theme` (dim marks, heading tint, code) — not a second theme system
+- [ ] Follow OS light/dark when settings exist; custom user themes Later
+- [ ] Polish pass: look is still changeable (Theme); Word = behavior not Word’s skin; prefer thin chrome unless we decide otherwise
 - [ ] Status bar: human conceal/read-edit label, not `{:?}`
 - [ ] Navbar that fits the 640px minimum width without emoji-chip overflow
+
+## GFM (CommonMark + GitHub extras)
+
+- [ ] Map `pulldown-cmark` events (with source offsets) into `char_range` / `group_range` spans
+- [ ] Images: parse `![alt](src)`; Live paints; popover edits alt/src
+- [ ] Tables: parse and 2D layout; caret/click per cell
+- [ ] Autolinks, reference links, backslash escapes
+- [ ] CommonMark emphasis (flanking rules), not only naive `**` / `*`
+- [ ] HTML in the rope: Live placeholder; Raw shows tags; no webview
+- [ ] Do not drop unknown GFM from the buffer; Live may show it as plain until laid out
+- [ ] Optional: Mermaid (or one fence language) Live-rendered; charts are not GFM
 
 ## Later docs
 

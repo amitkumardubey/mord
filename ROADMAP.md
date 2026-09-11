@@ -37,7 +37,7 @@ The parser must see a document. Undo must be something parse/project can invalid
 - `EditAction.start` is a char offset; document generation increments on edit
 - Motion / delete by grapheme; offsets remain char-based
 
-`pulldown-cmark` may feed events into spans. It must not become HTML in a webview.
+`pulldown-cmark` feeds events into spans. It must not become HTML in a webview.
 
 ## Then — commands, then a thin view
 
@@ -51,15 +51,48 @@ Word-like behavior is Markdown in, Markdown out — testable without GPUI.
 - Discoverable Bold / Italic / Code; Tab / Shift+Tab indent
 - `EditorView` binds input and paints layout; it does not re-detect prefixes
 
+## Word-like Live (after Then)
+
+Replace click-to-reveal with a document Live and a source Raw.
+
+- Live: closed marks stay hidden; show incomplete marks only while composing
+- Raw: source + light syntax color; identity mapping
+- Sticky Bold/Italic for collapsed-caret typing on the current line until Enter / toggle / caret leaves; no empty `****`
+- Select-then-format wrap/unwrap; shortcuts = toolbar (see AGENTS.md shortcut table)
+- Power-user chords: B/I/E, headings 1–6, K link, Shift+R Live/Raw, Shift+C copy source; no Vim
+- Heading control in Live (hashes stay hidden)
+- Link / image popovers
+
+## GFM — source in, document out
+
+The bar is **GitHub Flavored Markdown**, not a private dialect.
+
+Hard parts (do not hand-wave):
+
+- CommonMark **emphasis** (left/right flanking) is not naive `**` scanning
+- **Nested blocks** (quote in list in quote) vs today’s mostly line-prefix parse
+- **Tables** need a 2D layout, cell carets, and Tab-between-cells — not a decorated line
+- **Images** (`![alt](src)`) are blocks/inlines we paint, not more text runs only
+- **Indented code** (4 spaces) fights Tab-as-indent; prefer fenced code in Live commands
+- **HTML** in GFM: keep in the rope; Live can show a placeholder, Raw shows tags — do not run a browser
+- Spec tests are hundreds of examples; Live can lag Raw on edge cases, the buffer must still be GFM
+
+Order after Word-like Live/Raw/sticky: images + link popover, tables, then event-parse + emphasis/autolink/reference links. Charts (e.g. Mermaid in a fence) are optional and not GFM.
+
 ## Later — app and incrementality
 
 After the six stages exist. Clipboard and chrome wait until conceal-by-role is honest, so copy and read mode are not papering over three global modes.
 
 - Clipboard: **copy source** first (entire rope as Markdown — unambiguous); then copy / cut / paste of the selection
-- Read / Edit toggle: Read is a document (caret hidden, typing off, conceal always on under the mixed policy); Edit is the live loop. `Raw` remains an overlay in Edit, not a third product mode
-- Open / save; title; dirty flag
-- Cache projected lines by (document generation, conceal policy, caret token group / active line); dirty a range
+- Read / Edit toggle: Read is a document (caret hidden, typing off, Live conceal always on); Edit is the live loop. `Raw` is Edit-only (source, not a third product mode)
+- Open / save **Markdown files** (`.md`); optional `.txt` as Markdown (no importer). Dirty title. Export PDF / `.docx` is one-way from the rope — not a second document type
+- Cache projected lines by (document generation, Live vs Raw, caret); dirty a range
 - Theme tokens for accents; human status labels; navbar that fits 640px
+- Icons: one open set (or custom) for toolbar; no emoji as the design system
+- Link / image popovers edit the rope without showing markup in Live
+- Charts optional (image or one fence language); not required for GFM
+- Theming: light + dark; all paint via `Theme` tokens (Raw syntax colors included). Custom themes Later. Export PDF does not copy the editor’s dark chrome
+- Dedicated UI/theme polish pass after the engine is honest. Look can still change (Theme tokens). Word = editing behavior, not Microsoft’s visual design.
 
 ## Docs
 

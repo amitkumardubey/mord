@@ -1,17 +1,17 @@
 # Mord
 
-A **Word-like live Markdown editor** built in Rust with GPUI.
+A **live Markdown editor** with Word-like *editing* (in-place format, not a split preview), built in Rust with GPUI.
 
-You edit real Markdown. The screen looks like a formatted document. Syntax markers (`#`, `**`, `- [ ]`) stay hidden until the caret needs them. There is no split source/preview pane.
+You edit real Markdown. Live hides closed marks. Raw is the source. Look is a later pass.
 
 ## What this is
 
-- **Source of truth:** a Markdown rope (`DocumentBuffer`)
-- **View:** a visual projection (styled runs, concealed markers, Word-like page)
-- **Hard problem:** keep caret, click, and edits correct while markers appear and disappear
-- **Reveal modes:** token (caret on that mark), line (whole active line), raw (always show syntax)
+- **Source of truth:** a GitHub Flavored Markdown rope (`DocumentBuffer`)
+- **Live:** formatted projection (styled runs, concealed closed marks); look is polish
+- **Raw:** source with light syntax coloring
+- **Hard problem:** caret, click, and edits stay correct while Live hides markup
 
-Mord is early. The live conceal loop is the product; file chrome and a full CommonMark suite come later.
+Mord is early. The live loop is the product. The source bar is **GitHub Flavored Markdown** (not a private dialect). File chrome comes with that, not instead of it.
 
 ## Run
 
