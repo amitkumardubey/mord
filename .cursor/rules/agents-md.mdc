@@ -1,0 +1,17 @@
+---
+description: Always follow the Mord spec in AGENTS.md
+alwaysApply: true
+---
+
+# Load AGENTS.md
+
+Before changing Mord, read and follow `AGENTS.md` at the repository root.
+
+That file is the product spec:
+
+- Markdown in the rope is the source of truth; the screen is a visual projection
+- Conceal/reveal and visual ↔ buffer mapping are the core problem
+- Do not introduce a split preview or a second rich-text document
+- Prefix grammar lives in one place; paint and hit-test must agree
+
+If a task conflicts with `AGENTS.md`, follow `AGENTS.md` and say so.
