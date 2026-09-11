@@ -1,0 +1,24 @@
+[package]
+name = "mord"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+gpui-kit = "0.6.1"
+gpui-component = "0.6.1"
+pulldown-cmark = "0.13.4"
+ropey = "1.6.1"
+serde = "1.0.229"
+unicode-segmentation = "1.13.3"
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = 0
+
+[profile.test]
+debug = 1
+
+[profile.test.package."*"]
+debug = 0
