@@ -37,8 +37,13 @@ impl WrapKind {
     }
 }
 
-/// Wrap or unwrap the selection (or insert an empty pair at a collapsed caret).
-pub fn wrap_marks(buffer: &DocumentBuffer, sel_start: usize, sel_end: usize, kind: WrapKind) -> Edit {
+/// Wrap or unwrap the selection. Collapsed caret does nothing (no empty `****`).
+pub fn wrap_marks(
+    buffer: &DocumentBuffer,
+    sel_start: usize,
+    sel_end: usize,
+    kind: WrapKind,
+) -> Option<Edit> {
     let mut start = sel_start.min(sel_end);
     let mut end = sel_start.max(sel_end);
     let len = buffer.len_chars();
@@ -48,14 +53,7 @@ pub fn wrap_marks(buffer: &DocumentBuffer, sel_start: usize, sel_end: usize, kin
     let mark_len = mark.chars().count();
 
     if start == end {
-        let new_text = format!("{}{}", mark, mark);
-        let caret = start + mark_len;
-        return Edit {
-            start,
-            end,
-            new_text,
-            caret,
-        };
+        return None;
     }
 
     let selected = buffer.slice_to_string(start, end);
@@ -69,21 +67,54 @@ pub fn wrap_marks(buffer: &DocumentBuffer, sel_start: usize, sel_end: usize, kin
             .take(selected.chars().count() - mark_len * 2)
             .collect();
         let caret = start + inner.chars().count();
-        return Edit {
+        return Some(Edit {
             start,
             end,
             new_text: inner,
             caret,
-        };
+        });
     }
 
     let wrapped = format!("{}{}{}", mark, selected, mark);
     let caret = start + wrapped.chars().count();
-    Edit {
+    Some(Edit {
         start,
         end,
         new_text: wrapped,
         caret,
+    })
+}
+
+/// Set heading level on a line (`0` = paragraph). Rewrites the line prefix as one `Edit`.
+pub fn set_heading_level(buffer: &DocumentBuffer, line_idx: usize, level: usize) -> Edit {
+    let level = level.min(6);
+    let line = buffer.line_without_newline(line_idx).unwrap_or_default();
+    let line_start = buffer.line_to_char(line_idx);
+    let line_len = line.chars().count();
+
+    let content = if let Some(prefix) = parse_prefix(&line) {
+        match prefix.kind {
+            LinePrefixKind::Heading { .. }
+            | LinePrefixKind::Blockquote { .. }
+            | LinePrefixKind::Unordered { .. }
+            | LinePrefixKind::Ordered { .. }
+            | LinePrefixKind::Task { .. } => prefix.content_owned(&line),
+        }
+    } else {
+        line.clone()
+    };
+
+    let new_line = if level == 0 {
+        content
+    } else {
+        format!("{} {}", "#".repeat(level), content)
+    };
+    let new_prefix_len = if level == 0 { 0 } else { level + 1 };
+    Edit {
+        start: line_start,
+        end: line_start + line_len,
+        new_text: new_line,
+        caret: line_start + new_prefix_len,
     }
 }
 
@@ -377,12 +408,44 @@ mod tests {
     #[test]
     fn wrap_and_unwrap_bold() {
         let mut buf = DocumentBuffer::from_str("hello");
-        let edit = wrap_marks(&buf, 0, 5, WrapKind::Bold);
+        let edit = wrap_marks(&buf, 0, 5, WrapKind::Bold).unwrap();
         apply(&mut buf, edit);
         assert_eq!(buf.text(), "**hello**");
-        let edit = wrap_marks(&buf, 0, buf.len_chars(), WrapKind::Bold);
+        let edit = wrap_marks(&buf, 0, buf.len_chars(), WrapKind::Bold).unwrap();
         apply(&mut buf, edit);
         assert_eq!(buf.text(), "hello");
+    }
+
+    #[test]
+    fn collapsed_wrap_does_nothing() {
+        let buf = DocumentBuffer::from_str("hello");
+        assert!(wrap_marks(&buf, 2, 2, WrapKind::Bold).is_none());
+        assert!(wrap_marks(&buf, 2, 2, WrapKind::Italic).is_none());
+        assert!(wrap_marks(&buf, 2, 2, WrapKind::Code).is_none());
+    }
+
+    #[test]
+    fn set_heading_level_wrap_unwrap() {
+        let mut buf = DocumentBuffer::from_str("My Title");
+        let edit = set_heading_level(&buf, 0, 3);
+        apply(&mut buf, edit);
+        assert_eq!(buf.text(), "### My Title");
+
+        let edit = set_heading_level(&buf, 0, 1);
+        apply(&mut buf, edit);
+        assert_eq!(buf.text(), "# My Title");
+
+        let edit = set_heading_level(&buf, 0, 0);
+        apply(&mut buf, edit);
+        assert_eq!(buf.text(), "My Title");
+    }
+
+    #[test]
+    fn set_heading_from_list_strips_marker() {
+        let mut buf = DocumentBuffer::from_str("- item");
+        let edit = set_heading_level(&buf, 0, 2);
+        apply(&mut buf, edit);
+        assert_eq!(buf.text(), "## item");
     }
 
     #[test]

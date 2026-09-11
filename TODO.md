@@ -60,13 +60,13 @@ Edit log:
 
 ## Word-like Live (agreed, not built)
 
-- [ ] Live hides closed marks (no click-to-reveal `**` / hashes); incomplete syntax may show while typing
-- [ ] Raw is source + light syntax color (no type scale, no glyph substitutes); mapping is 1:1
+- [x] Live hides closed marks (no click-to-reveal `**` / hashes); incomplete and empty wraps stay visible while composing; line prefixes stay visible while typing that line, not on click
+- [x] Raw is source + light syntax color (no type scale, no glyph substitutes); mapping is 1:1
 - [ ] Sticky Bold/Italic: collapsed caret arms typing on this line until Enter, toggle, or caret leaves; no empty `****`
 - [ ] Select-then-format wrap/unwrap; Ctrl/Cmd-B/I match toolbar; Code is selection-only (Ctrl/Cmd-E)
 - [ ] Shortcuts: Ctrl/Cmd-1…6 headings; K link; Shift+X strikethrough; Shift+R Live/Raw; Shift+E Read/Edit; Shift+C copy source; S save; C/X/V clipboard when those exist
 
-- [ ] Heading level control (Live does not show `### `)
+- [x] Heading level control (Live does not show `### `)
 - [ ] Link popover; image popover (`![alt](src)`)
 - [ ] Toolbar icons from one icon set (not emoji)
 

@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn selection_range_on_concealed_heading() {
         let parsed = MarkdownParser::parse_line("### My Title");
-        let decorated = Decorator::decorate_line(0, &parsed, None, ConcealMode::Live, 1.30);
+        let decorated = Decorator::decorate_line(0, &parsed, None, ConcealMode::Live, 1.30, false);
         let range = line_selection_visual_range(&decorated, 0, 12, 4, 6).unwrap();
         assert_eq!(range.start, VisualCol(0));
         assert_eq!(range.end, VisualCol(2));

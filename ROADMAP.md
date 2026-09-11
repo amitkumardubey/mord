@@ -55,12 +55,12 @@ Word-like behavior is Markdown in, Markdown out — testable without GPUI.
 
 Replace click-to-reveal with a document Live and a source Raw.
 
-- Live: closed marks stay hidden; show incomplete marks only while composing
+- Live: closed marks stay hidden; incomplete and empty wraps stay visible while composing; line prefixes stay visible while typing that line, not on click
 - Raw: source + light syntax color; identity mapping
 - Sticky Bold/Italic for collapsed-caret typing on the current line until Enter / toggle / caret leaves; no empty `****`
 - Select-then-format wrap/unwrap; shortcuts = toolbar (see AGENTS.md shortcut table)
 - Power-user chords: B/I/E, headings 1–6, K link, Shift+R Live/Raw, Shift+C copy source; no Vim
-- Heading control in Live (hashes stay hidden)
+- Heading control in Live (hashes hide after you leave the line)
 - Link / image popovers
 
 ## GFM — source in, document out

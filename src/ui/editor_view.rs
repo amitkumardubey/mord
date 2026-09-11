@@ -19,6 +19,8 @@ pub struct EditorView {
     pub buffer: DocumentBuffer,
     pub cursor: CursorManager,
     pub conceal_mode: ConcealMode,
+    /// Row whose line prefixes are revealed because the user is typing there.
+    composing_row: Option<usize>,
     pub theme: Theme,
     pub focus_handle: FocusHandle,
     pub dragging: bool,
@@ -32,11 +34,11 @@ impl EditorView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let sample_text = r#"# Welcome to Mord
 
-Mord is a **high-performance** Word-like *live inline preview* Markdown editor built with Rust and GPUI.
+Mord is a **high-performance** Word-like *live* Markdown editor built with Rust and GPUI.
 
 ### Key Capabilities
 1. High-speed GPU accelerated text layout
-2. Token-level live inline syntax reveal
+2. Live hides closed marks; Raw shows source
 3. Accurate mouse click positioning
 4. Smart auto-indenting lists and task lists
 
@@ -49,7 +51,7 @@ Mord is a **high-performance** Word-like *live inline preview* Markdown editor b
 
 Here is some `inline code` and a link to [GPUI Kit](https://gpui-kit.com).
 
-Type anywhere to see live inline syntax formatting in action!
+Type anywhere to see live Markdown formatting in action!
 "#;
 
         let focus_handle = cx.focus_handle();
@@ -57,6 +59,7 @@ Type anywhere to see live inline syntax formatting in action!
             buffer: DocumentBuffer::from_str(sample_text),
             cursor: CursorManager::new(),
             conceal_mode: ConcealMode::Live,
+            composing_row: None,
             theme: Theme::dark(),
             focus_handle: focus_handle.clone(),
             dragging: false,
@@ -143,16 +146,48 @@ Type anywhere to see live inline syntax formatting in action!
                 &self.buffer.line_without_newline(row).unwrap_or_default(),
             )
         });
-        let scale = match parsed.block_kind {
-            BlockKind::Heading { level } => self.theme.heading_scale(level),
-            _ => 1.0,
+        let scale = match (self.conceal_mode, &parsed.block_kind) {
+            (ConcealMode::Raw, _) => 1.0,
+            (ConcealMode::Live, BlockKind::Heading { level }) => self.theme.heading_scale(*level),
+            (ConcealMode::Live, _) => 1.0,
         };
-        Decorator::decorate_line(row, &parsed, cursor_col, self.conceal_mode, scale)
+        let reveal_line_markers = self.composing_row == Some(row);
+        Decorator::decorate_line(
+            row,
+            &parsed,
+            cursor_col,
+            self.conceal_mode,
+            scale,
+            reveal_line_markers,
+        )
+    }
+
+    fn current_row(&self) -> usize {
+        self.buffer
+            .char_offset_to_point(self.cursor.cursor_offset().get())
+            .row
+    }
+
+    fn mark_line_composing(&mut self) {
+        self.composing_row = Some(self.current_row());
+    }
+
+    fn clear_line_composing_if_moved(&mut self) {
+        if self.composing_row != Some(self.current_row()) {
+            self.composing_row = None;
+        }
     }
 
     fn apply_edit(&mut self, edit: commands::Edit, cx: &mut Context<Self>) {
+        self.apply_edit_inner(edit, true, cx);
+    }
+
+    fn apply_edit_inner(&mut self, edit: commands::Edit, composing: bool, cx: &mut Context<Self>) {
         let caret = edit.apply(&mut self.buffer);
         self.cursor.set_cursor(BufferOffset(caret));
+        if composing {
+            self.mark_line_composing();
+        }
         self.reset_blink(cx);
         self.scroll_caret_into_view();
         cx.notify();
@@ -178,6 +213,7 @@ Type anywhere to see live inline syntax formatting in action!
             self.cursor
                 .set_cursor(BufferOffset(pos + text.chars().count()));
         }
+        self.mark_line_composing();
         self.reset_blink(cx);
         self.scroll_caret_into_view();
         cx.notify();
@@ -195,6 +231,7 @@ Type anywhere to see live inline syntax formatting in action!
             let range = self.cursor.selection.range();
             self.buffer.delete_range(range.start, range.end);
             self.cursor.set_cursor(BufferOffset(range.start));
+            self.mark_line_composing();
             self.reset_blink(cx);
             cx.notify();
             return;
@@ -205,6 +242,7 @@ Type anywhere to see live inline syntax formatting in action!
             let text = self.buffer.text();
             let next = next_grapheme_char_offset(&text, pos);
             self.buffer.delete_range(pos, next);
+            self.mark_line_composing();
             self.reset_blink(cx);
             cx.notify();
         }
@@ -223,20 +261,44 @@ Type anywhere to see live inline syntax formatting in action!
 
     pub fn toggle_bold(&mut self, cx: &mut Context<Self>) {
         let range = self.cursor.selection.range();
-        let edit = commands::wrap_marks(&self.buffer, range.start, range.end, WrapKind::Bold);
-        self.apply_edit(edit, cx);
+        if let Some(edit) = commands::wrap_marks(&self.buffer, range.start, range.end, WrapKind::Bold)
+        {
+            self.apply_edit_inner(edit, false, cx);
+        }
     }
 
     pub fn toggle_italic(&mut self, cx: &mut Context<Self>) {
         let range = self.cursor.selection.range();
-        let edit = commands::wrap_marks(&self.buffer, range.start, range.end, WrapKind::Italic);
-        self.apply_edit(edit, cx);
+        if let Some(edit) =
+            commands::wrap_marks(&self.buffer, range.start, range.end, WrapKind::Italic)
+        {
+            self.apply_edit_inner(edit, false, cx);
+        }
     }
 
     pub fn toggle_code(&mut self, cx: &mut Context<Self>) {
         let range = self.cursor.selection.range();
-        let edit = commands::wrap_marks(&self.buffer, range.start, range.end, WrapKind::Code);
+        if let Some(edit) = commands::wrap_marks(&self.buffer, range.start, range.end, WrapKind::Code)
+        {
+            self.apply_edit_inner(edit, false, cx);
+        }
+    }
+
+    pub fn set_heading_level(&mut self, level: usize, cx: &mut Context<Self>) {
+        let row = self
+            .buffer
+            .char_offset_to_point(self.cursor.cursor_offset().get())
+            .row;
+        let edit = commands::set_heading_level(&self.buffer, row, level);
         self.apply_edit(edit, cx);
+    }
+
+    pub fn toggle_live_raw(&mut self, cx: &mut Context<Self>) {
+        let next = match self.conceal_mode {
+            ConcealMode::Live => ConcealMode::Raw,
+            ConcealMode::Raw => ConcealMode::Live,
+        };
+        self.set_conceal_mode(next, cx);
     }
 
     pub fn toggle_task_at_line(&mut self, line_idx: usize, cx: &mut Context<Self>) {
@@ -321,11 +383,13 @@ Type anywhere to see live inline syntax formatting in action!
                     if modifiers.shift {
                         if let Some(pos) = self.buffer.redo() {
                             self.cursor.set_cursor(BufferOffset(pos));
+                            self.composing_row = None;
                             self.reset_blink(cx);
                             cx.notify();
                         }
                     } else if let Some(pos) = self.buffer.undo() {
                         self.cursor.set_cursor(BufferOffset(pos));
+                        self.composing_row = None;
                         self.reset_blink(cx);
                         cx.notify();
                     }
@@ -334,6 +398,7 @@ Type anywhere to see live inline syntax formatting in action!
                 "y" | "Y" => {
                     if let Some(pos) = self.buffer.redo() {
                         self.cursor.set_cursor(BufferOffset(pos));
+                        self.composing_row = None;
                         self.reset_blink(cx);
                         cx.notify();
                     }
@@ -341,6 +406,7 @@ Type anywhere to see live inline syntax formatting in action!
                 }
                 "a" | "A" => {
                     self.cursor.select_all(&self.buffer);
+                    self.composing_row = None;
                     cx.notify();
                     return;
                 }
@@ -356,6 +422,34 @@ Type anywhere to see live inline syntax formatting in action!
                     self.toggle_code(cx);
                     return;
                 }
+                "r" | "R" if modifiers.shift => {
+                    self.toggle_live_raw(cx);
+                    return;
+                }
+                "1" => {
+                    self.set_heading_level(1, cx);
+                    return;
+                }
+                "2" => {
+                    self.set_heading_level(2, cx);
+                    return;
+                }
+                "3" => {
+                    self.set_heading_level(3, cx);
+                    return;
+                }
+                "4" => {
+                    self.set_heading_level(4, cx);
+                    return;
+                }
+                "5" => {
+                    self.set_heading_level(5, cx);
+                    return;
+                }
+                "6" => {
+                    self.set_heading_level(6, cx);
+                    return;
+                }
                 _ => {}
             }
         }
@@ -366,12 +460,14 @@ Type anywhere to see live inline syntax formatting in action!
             "enter" => self.insert_newline(cx),
             "left" => {
                 self.cursor.move_left(&self.buffer, modifiers.shift);
+                self.clear_line_composing_if_moved();
                 self.reset_blink(cx);
                 self.scroll_caret_into_view();
                 cx.notify();
             }
             "right" => {
                 self.cursor.move_right(&self.buffer, modifiers.shift);
+                self.clear_line_composing_if_moved();
                 self.reset_blink(cx);
                 self.scroll_caret_into_view();
                 cx.notify();
@@ -388,6 +484,7 @@ Type anywhere to see live inline syntax formatting in action!
                 } else {
                     self.cursor.set_head(BufferOffset(0), modifiers.shift);
                 }
+                self.clear_line_composing_if_moved();
                 self.reset_blink(cx);
                 self.scroll_caret_into_view();
                 cx.notify();
@@ -406,6 +503,7 @@ Type anywhere to see live inline syntax formatting in action!
                     self.cursor
                         .set_head(BufferOffset(self.buffer.len_chars()), modifiers.shift);
                 }
+                self.clear_line_composing_if_moved();
                 self.reset_blink(cx);
                 self.scroll_caret_into_view();
                 cx.notify();
@@ -658,6 +756,7 @@ impl Render for EditorView {
                             view.dragging = true;
                             view.cursor
                                 .set_head(offset, event.modifiers.shift);
+                            view.clear_line_composing_if_moved();
                             view.reset_blink(cx);
                             cx.notify();
                         }
@@ -667,6 +766,7 @@ impl Render for EditorView {
                     if view.dragging {
                         if let Some((offset, _)) = view.hit_test_at(window, row, event.position) {
                             view.cursor.set_head(offset, true);
+                            view.clear_line_composing_if_moved();
                             view.reset_blink(cx);
                             cx.notify();
                         }

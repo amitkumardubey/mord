@@ -37,7 +37,7 @@ Locked in with the user; agents follow these over older Token/Line wording.
 
 **Modes**
 - Global Token vs Line is gone. **Live** and **Raw** only.
-- **Live:** formatted Markdown in place, closed markup hidden. Task/list glyphs, not source `- [ ]`. Heading hashes hidden; change level with a control or Raw. How large headings are, and how much margin the buffer has, is polish — not an invariant.
+- **Live:** formatted Markdown in place, closed markup hidden. While composing (typing), line prefixes (heading hashes, list/task/quote markers) stay visible; they hide when you leave the line or click into a finished line. Inline markers stay visible until the wrap is closed (has inner text). Inactive lists/tasks use glyphs, not source `- [ ]`. Heading level can also change with a control or Raw. How large headings are, and how much margin the buffer has, is polish — not an invariant.
 - **Raw:** source editor (VS Code/Cursor-like). Visual column = buffer column. Light syntax coloring only — no heading type scale, no `•`/`☑` substitutes.
 - **Read / Edit:** Read is Live with no caret/typing; Edit is the live loop. Raw is Edit-only.
 
@@ -82,7 +82,7 @@ Locked in with the user; agents follow these over older Token/Line wording.
 - **Paint and hit-test must agree.** If a glyph is at visual column V, click and caret at V must map to the same buffer column.
 - **Preferred column for Up/Down is visual**, then mapped to the target line — not a raw buffer column (concealed `### ` would jump).
 - **Conceal changes visibility, not the buffer.**
-- **Live hides closed marks.** Do not use a global Token vs Line switch. Incomplete syntax may reveal while composing. **Raw** is 1:1 source with light color.
+- **Live hides closed marks.** Line prefixes reveal while typing that line, not on click; inline markers reveal until the wrap has content. Incomplete syntax may stay visible while composing. **Raw** is 1:1 source with light color.
 - **Fenced code is a document span**, not a one-line prefix. Body lines must not run inline conceal.
 
 ## Layout
@@ -110,7 +110,7 @@ A custom span model exists because we need **per-character ranges and token grou
 Add or extend tests for:
 
 - Inactive heading: visual `My Title` ↔ buffer after `### `
-- Live heading: hashes stay hidden while the caret is on the title; inline `**` on the same line stays hidden unless the wrap is still incomplete
+- Live heading: hashes stay hidden when the caret is placed by click; they show while typing on that line. Closed inline `**` on the same line stays hidden; incomplete/empty wraps stay visible
 - Click past the visual end → line end, not a panic
 - Up/Down from a concealed heading onto a paragraph keeps visual column
 - Selection is visible and uses the same map as the caret

@@ -268,7 +268,7 @@ mod tests {
             crate::editor::BlockKind::Heading { level: 1 } => 1.85,
             _ => 1.0,
         };
-        Decorator::decorate_line(0, &parsed, cursor_col, ConcealMode::Live, scale)
+        Decorator::decorate_line(0, &parsed, cursor_col, ConcealMode::Live, scale, false)
     }
 
     #[test]
