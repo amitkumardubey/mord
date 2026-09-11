@@ -69,13 +69,10 @@ impl CursorManager {
         self.preferred_col = None;
     }
 
-    pub fn move_left(&mut self, _buffer: &DocumentBuffer, extend_selection: bool) {
+    pub fn move_left(&mut self, buffer: &DocumentBuffer, extend_selection: bool) {
         let head = self.selection.head;
-        let new_head = if head.get() > 0 {
-            head - 1
-        } else {
-            BufferOffset(0)
-        };
+        let text = buffer.text();
+        let new_head = BufferOffset(previous_grapheme_char_offset(&text, head.get()));
         if extend_selection {
             self.selection.head = new_head;
         } else if !self.selection.is_collapsed() {
@@ -89,7 +86,9 @@ impl CursorManager {
     pub fn move_right(&mut self, buffer: &DocumentBuffer, extend_selection: bool) {
         let max_len = BufferOffset(buffer.len_chars());
         let head = self.selection.head;
-        let new_head = if head < max_len { head + 1 } else { max_len };
+        let text = buffer.text();
+        let next = BufferOffset(next_grapheme_char_offset(&text, head.get()));
+        let new_head = next.min(max_len);
         if extend_selection {
             self.selection.head = new_head;
         } else if !self.selection.is_collapsed() {
@@ -222,6 +221,38 @@ fn line_char_len(buffer: &DocumentBuffer, row: usize) -> usize {
         .line_without_newline(row)
         .map(|s| s.chars().count())
         .unwrap_or(0)
+}
+
+/// Char offset of the start of the grapheme before `char_offset` (or 0).
+pub fn previous_grapheme_char_offset(text: &str, char_offset: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    if char_offset == 0 {
+        return 0;
+    }
+    let byte = crate::editor::offset::char_to_byte_index(text, char_offset);
+    let prev_byte = text
+        .grapheme_indices(true)
+        .map(|(i, _)| i)
+        .take_while(|&i| i < byte)
+        .last()
+        .unwrap_or(0);
+    crate::editor::offset::byte_to_char_index(text, prev_byte)
+}
+
+/// Char offset after the grapheme at `char_offset` (or end).
+pub fn next_grapheme_char_offset(text: &str, char_offset: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    let total = text.chars().count();
+    if char_offset >= total {
+        return total;
+    }
+    let byte = crate::editor::offset::char_to_byte_index(text, char_offset);
+    let next_byte = text
+        .grapheme_indices(true)
+        .find(|(i, _)| *i > byte)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    crate::editor::offset::byte_to_char_index(text, next_byte)
 }
 
 #[cfg(test)]

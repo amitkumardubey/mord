@@ -7,7 +7,7 @@ Working list for the live-inline editor. Check items off in this file. Order mat
 Types so the compiler can catch a wrong space:
 
 - [x] Newtypes (or equivalent wrappers) for buffer offset, buffer column, visual column
-- [x] Decide grapheme vs char for `TextPoint` / motion; update the comment that says “or” (chars for now; graphemes on Next)
+- [x] Decide grapheme vs char for `TextPoint` / motion; update the comment that says “or” (char offsets; grapheme motion on Next — done)
 
 Selection and caret on that map:
 
@@ -29,20 +29,20 @@ Layout is a stage, not a guess:
 
 Parse a document:
 
-- [ ] Track fence-open state (or event parse) so code-block body is not a paragraph
-- [ ] Single prefix grammar used by parser, decorator, Enter, Backspace, and task toggle
-- [ ] `---` / `***` / `___` use a horizontal-rule marker, not `CodeFence`
-- [ ] Paint strikethrough; parse `***` as bold-italic (or drop unused `BoldItalic`)
-- [ ] Heading `group_range` is the `### ` token, not the whole line
-- [ ] Unmatched `` ` `` does not abort the rest of the line
+- [x] Track fence-open state (or event parse) so code-block body is not a paragraph
+- [x] Single prefix grammar used by parser, decorator, Enter, Backspace, and task toggle
+- [x] `---` / `***` / `___` use a horizontal-rule marker, not `CodeFence`
+- [x] Paint strikethrough; parse `***` as bold-italic (or drop unused `BoldItalic`)
+- [x] Heading `group_range` is the `### ` token, not the whole line
+- [x] Unmatched `` ` `` does not abort the rest of the line
 
 Edit log:
 
-- [ ] Coalesce sequential inserts in undo; replacing a selection is one undo entry
-- [ ] `replace_range` orders start/end so it cannot panic
-- [ ] Rename `EditAction.start_byte` to the unit we actually store
-- [ ] Document generation (or equivalent version) increments on each applied edit
-- [ ] Move / backspace / delete by grapheme (`unicode-segmentation`) if that is the chosen unit
+- [x] Coalesce sequential inserts in undo; replacing a selection is one undo entry
+- [x] `replace_range` orders start/end so it cannot panic
+- [x] Rename `EditAction.start_byte` to the unit we actually store
+- [x] Document generation (or equivalent version) increments on each applied edit
+- [x] Move / backspace / delete by grapheme (`unicode-segmentation`) if that is the chosen unit
 
 ## Then — commands, then a thin view
 

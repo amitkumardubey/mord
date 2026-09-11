@@ -2,13 +2,15 @@ use ropey::Rope;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextPoint {
+    /// Unicode scalar (char) index in line. Motion may step by grapheme but offsets stay char-based.
     pub row: usize,
-    pub col: usize, // Unicode scalar (char) index in line; graphemes are a later concern
+    pub col: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditAction {
-    pub start_byte: usize,
+    /// Character offset into the rope where the edit starts.
+    pub start: usize,
     pub old_text: String,
     pub new_text: String,
 }
@@ -17,6 +19,8 @@ pub struct DocumentBuffer {
     rope: Rope,
     undo_stack: Vec<EditAction>,
     redo_stack: Vec<EditAction>,
+    /// Increments on every applied edit (insert/delete/replace/undo/redo).
+    generation: u64,
 }
 
 impl DocumentBuffer {
@@ -25,6 +29,7 @@ impl DocumentBuffer {
             rope: Rope::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            generation: 0,
         }
     }
 
@@ -33,7 +38,12 @@ impl DocumentBuffer {
             rope: Rope::from_str(initial),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            generation: 0,
         }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn rope(&self) -> &Rope {
@@ -57,9 +67,8 @@ impl DocumentBuffer {
     }
 
     pub fn line_without_newline(&self, line_idx: usize) -> Option<String> {
-        self.line_to_string(line_idx).map(|s| {
-            s.trim_end_matches(['\r', '\n']).to_string()
-        })
+        self.line_to_string(line_idx)
+            .map(|s| s.trim_end_matches(['\r', '\n']).to_string())
     }
 
     pub fn char_to_line(&self, char_idx: usize) -> usize {
@@ -102,81 +111,110 @@ impl DocumentBuffer {
     }
 
     pub fn insert(&mut self, char_idx: usize, text: &str) {
+        if text.is_empty() {
+            return;
+        }
         let char_idx = char_idx.min(self.rope.len_chars());
         self.rope.insert(char_idx, text);
-        self.undo_stack.push(EditAction {
-            start_byte: char_idx,
-            old_text: String::new(),
-            new_text: text.to_string(),
-        });
+        self.push_or_coalesce_insert(char_idx, text);
         self.redo_stack.clear();
+        self.generation = self.generation.wrapping_add(1);
     }
 
     pub fn delete_range(&mut self, start_char: usize, end_char: usize) -> String {
-        let start = start_char.min(self.rope.len_chars());
-        let end = end_char.min(self.rope.len_chars());
+        let mut start = start_char.min(self.rope.len_chars());
+        let mut end = end_char.min(self.rope.len_chars());
+        if start > end {
+            std::mem::swap(&mut start, &mut end);
+        }
         if start >= end {
             return String::new();
         }
         let old_text = self.rope.slice(start..end).to_string();
         self.rope.remove(start..end);
         self.undo_stack.push(EditAction {
-            start_byte: start,
+            start,
             old_text: old_text.clone(),
             new_text: String::new(),
         });
         self.redo_stack.clear();
+        self.generation = self.generation.wrapping_add(1);
         old_text
     }
 
     pub fn replace_range(&mut self, start_char: usize, end_char: usize, text: &str) {
-        let start = start_char.min(self.rope.len_chars());
-        let end = end_char.min(self.rope.len_chars());
-        let old_text = self.rope.slice(start..end).to_string();
-        self.rope.remove(start..end);
-        self.rope.insert(start, text);
+        let mut start = start_char.min(self.rope.len_chars());
+        let mut end = end_char.min(self.rope.len_chars());
+        if start > end {
+            std::mem::swap(&mut start, &mut end);
+        }
+        let old_text = if start < end {
+            self.rope.slice(start..end).to_string()
+        } else {
+            String::new()
+        };
+        if start < end {
+            self.rope.remove(start..end);
+        }
+        if !text.is_empty() {
+            self.rope.insert(start, text);
+        }
         self.undo_stack.push(EditAction {
-            start_byte: start,
+            start,
             old_text,
             new_text: text.to_string(),
         });
         self.redo_stack.clear();
+        self.generation = self.generation.wrapping_add(1);
     }
 
     pub fn undo(&mut self) -> Option<usize> {
-        if let Some(action) = self.undo_stack.pop() {
-            let start = action.start_byte;
-            let inserted_len = action.new_text.chars().count();
-            if inserted_len > 0 {
-                self.rope.remove(start..start + inserted_len);
-            }
-            if !action.old_text.is_empty() {
-                self.rope.insert(start, &action.old_text);
-            }
-            let cursor = start + action.old_text.chars().count();
-            self.redo_stack.push(action);
-            Some(cursor)
-        } else {
-            None
+        let action = self.undo_stack.pop()?;
+        let start = action.start;
+        let inserted_len = action.new_text.chars().count();
+        if inserted_len > 0 {
+            self.rope.remove(start..start + inserted_len);
         }
+        if !action.old_text.is_empty() {
+            self.rope.insert(start, &action.old_text);
+        }
+        let cursor = start + action.old_text.chars().count();
+        self.redo_stack.push(action);
+        self.generation = self.generation.wrapping_add(1);
+        Some(cursor)
     }
 
     pub fn redo(&mut self) -> Option<usize> {
-        if let Some(action) = self.redo_stack.pop() {
-            let start = action.start_byte;
-            let removed_len = action.old_text.chars().count();
-            if removed_len > 0 {
-                self.rope.remove(start..start + removed_len);
-            }
-            if !action.new_text.is_empty() {
-                self.rope.insert(start, &action.new_text);
-            }
-            let cursor = start + action.new_text.chars().count();
-            self.undo_stack.push(action);
-            Some(cursor)
-        } else {
-            None
+        let action = self.redo_stack.pop()?;
+        let start = action.start;
+        let removed_len = action.old_text.chars().count();
+        if removed_len > 0 {
+            self.rope.remove(start..start + removed_len);
         }
+        if !action.new_text.is_empty() {
+            self.rope.insert(start, &action.new_text);
+        }
+        let cursor = start + action.new_text.chars().count();
+        self.undo_stack.push(action);
+        self.generation = self.generation.wrapping_add(1);
+        Some(cursor)
+    }
+
+    /// Coalesce adjacent insert-only typing into one undo entry.
+    fn push_or_coalesce_insert(&mut self, char_idx: usize, text: &str) {
+        if let Some(last) = self.undo_stack.last_mut() {
+            let is_insert_only = last.old_text.is_empty() && !last.new_text.is_empty();
+            let end = last.start + last.new_text.chars().count();
+            if is_insert_only && end == char_idx && !text.contains('\n') {
+                last.new_text.push_str(text);
+                return;
+            }
+        }
+        self.undo_stack.push(EditAction {
+            start: char_idx,
+            old_text: String::new(),
+            new_text: text.to_string(),
+        });
     }
 }
 
@@ -208,14 +246,37 @@ mod tests {
         let mut doc = DocumentBuffer::from_str("Hello World\nSecond line");
         assert_eq!(doc.len_lines(), 2);
         assert_eq!(doc.line_without_newline(0).unwrap(), "Hello World");
-        
+
         doc.insert(5, " Beautiful");
-        assert_eq!(doc.line_without_newline(0).unwrap(), "Hello Beautiful World");
-        
+        assert_eq!(
+            doc.line_without_newline(0).unwrap(),
+            "Hello Beautiful World"
+        );
+
         doc.undo();
         assert_eq!(doc.line_without_newline(0).unwrap(), "Hello World");
-        
+
         doc.redo();
-        assert_eq!(doc.line_without_newline(0).unwrap(), "Hello Beautiful World");
+        assert_eq!(
+            doc.line_without_newline(0).unwrap(),
+            "Hello Beautiful World"
+        );
+    }
+
+    #[test]
+    fn coalesce_adjacent_inserts() {
+        let mut doc = DocumentBuffer::new();
+        doc.insert(0, "h");
+        doc.insert(1, "i");
+        assert_eq!(doc.undo_stack.len(), 1);
+        assert_eq!(doc.undo_stack[0].new_text, "hi");
+        assert_eq!(doc.generation(), 2);
+    }
+
+    #[test]
+    fn replace_range_orders_inverted() {
+        let mut doc = DocumentBuffer::from_str("abcdef");
+        doc.replace_range(4, 1, "X");
+        assert_eq!(doc.text(), "aXef");
     }
 }

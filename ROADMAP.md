@@ -34,8 +34,8 @@ The parser must see a document. Undo must be something parse/project can invalid
 - Strikethrough painted; `***` defined or `BoldItalic` removed
 - Unmatched `` ` `` does not abort the rest of the line
 - Coalesced undo; replace-selection is one entry; `replace_range` cannot take an inverted range
-- `EditAction.start_byte` becomes a char/grapheme offset; document generation increments on edit
-- Motion / delete by grapheme if that is the unit we committed to
+- `EditAction.start` is a char offset; document generation increments on edit
+- Motion / delete by grapheme; offsets remain char-based
 
 `pulldown-cmark` may feed events into spans. It must not become HTML in a webview.
 

@@ -34,6 +34,7 @@ File I/O and clipboard matter for a finished app. They are not the thesis.
 - `src/editor/offset.rs` — `BufferOffset` / `BufferCol` / `VisualCol` newtypes
 - `src/editor/selection.rs` — caret + selection; Up/Down preferred column is visual
 - `src/editor/parser.rs` — line/document parse → spans with `char_range` + `group_range`
+- `src/editor/prefix.rs` — one prefix grammar (heading / quote / list / task)
 - `src/editor/decorator.rs` — spans + conceal + caret → visual runs + `char_map`
 - `src/editor/layout.rs` — visual runs → GPUI `TextRun`s; byte ↔ visual mapping
 - `src/ui/document_line.rs` — shaped-line paint, overlay caret, selection quads

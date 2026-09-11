@@ -404,6 +404,17 @@ mod tests {
     }
 
     #[test]
+    fn test_token_reveal_heading_only_prefix() {
+        let parsed = MarkdownParser::parse_line("### My Title");
+        // Caret on title content (col 6) — prefix stays concealed
+        let dec = Decorator::decorate_line(0, &parsed, Some(6), ConcealMode::TokenReveal);
+        assert_eq!(dec.display_text, "My Title");
+        // Caret on the hashes (col 1) — prefix reveals
+        let dec2 = Decorator::decorate_line(0, &parsed, Some(1), ConcealMode::TokenReveal);
+        assert_eq!(dec2.display_text, "### My Title");
+    }
+
+    #[test]
     fn test_token_level_proximity_reveal() {
         let line = "Hello **bold** and *italic*";
         let parsed = MarkdownParser::parse_line(line);

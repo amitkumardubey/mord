@@ -4,6 +4,7 @@ use crate::editor::{
     layout::hit_test_wrapped_line,
     offset::BufferOffset,
     parser::{BlockKind, MarkdownParser},
+    prefix::{parse_prefix, LinePrefixKind},
     selection::CursorManager,
 };
 use crate::ui::document_line::{DocumentLine, LineCacheMap};
@@ -112,15 +113,36 @@ Type anywhere to see live inline syntax formatting in action!
         cx.notify();
     }
 
+    fn parsed_document(&self) -> Vec<crate::editor::ParsedLine> {
+        let lines: Vec<String> = (0..self.buffer.len_lines())
+            .map(|i| self.buffer.line_without_newline(i).unwrap_or_default())
+            .collect();
+        MarkdownParser::parse_document(&lines)
+    }
+
     fn decorate_row(&self, row: usize) -> crate::editor::DecoratedLine {
-        let raw = self.buffer.line_without_newline(row).unwrap_or_default();
-        let cursor_point = self.buffer.char_offset_to_point(self.cursor.cursor_offset().get());
+        let parsed_doc = self.parsed_document();
+        self.decorate_parsed_row(row, &parsed_doc)
+    }
+
+    fn decorate_parsed_row(
+        &self,
+        row: usize,
+        parsed_doc: &[crate::editor::ParsedLine],
+    ) -> crate::editor::DecoratedLine {
+        let cursor_point = self
+            .buffer
+            .char_offset_to_point(self.cursor.cursor_offset().get());
         let cursor_col = if row == cursor_point.row {
             Some(cursor_point.col)
         } else {
             None
         };
-        let parsed = MarkdownParser::parse_line(&raw);
+        let parsed = parsed_doc.get(row).cloned().unwrap_or_else(|| {
+            MarkdownParser::parse_line(
+                &self.buffer.line_without_newline(row).unwrap_or_default(),
+            )
+        });
         Decorator::decorate_line(row, &parsed, cursor_col, self.conceal_mode)
     }
 
@@ -135,13 +157,15 @@ Type anywhere to see live inline syntax formatting in action!
     pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if !self.cursor.selection.is_collapsed() {
             let range = self.cursor.selection.range();
-            self.buffer.delete_range(range.start, range.end);
-            self.cursor.set_cursor(BufferOffset(range.start));
+            self.buffer.replace_range(range.start, range.end, text);
+            self.cursor
+                .set_cursor(BufferOffset(range.start + text.chars().count()));
+        } else {
+            let pos = self.cursor.cursor_offset().get();
+            self.buffer.insert(pos, text);
+            self.cursor
+                .set_cursor(BufferOffset(pos + text.chars().count()));
         }
-        let pos = self.cursor.cursor_offset().get();
-        self.buffer.insert(pos, text);
-        self.cursor
-            .set_cursor(BufferOffset(pos + text.chars().count()));
         self.reset_blink(cx);
         self.scroll_caret_into_view();
         cx.notify();
@@ -203,34 +227,10 @@ Type anywhere to see live inline syntax formatting in action!
             return;
         }
 
-        let after_indent = &current_line[indent_len..];
-        let prefix_len = if after_indent.starts_with("- [ ] ") || after_indent.starts_with("- [x] ")
-        {
-            Some(indent_len + 6)
-        } else if after_indent.starts_with("- ")
-            || after_indent.starts_with("* ")
-            || after_indent.starts_with("> ")
-        {
-            Some(indent_len + 2)
-        } else {
-            let digits = after_indent.chars().take_while(|c| c.is_ascii_digit()).count();
-            if digits > 0 && after_indent[digits..].starts_with(". ") {
-                Some(indent_len + digits + 2)
-            } else if after_indent.starts_with('#') {
-                let hashes = after_indent.chars().take_while(|&c| c == '#').count();
-                if after_indent[hashes..].starts_with(' ') {
-                    Some(indent_len + hashes + 1)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        if let Some(plen) = prefix_len {
-            if point.col <= plen {
-                self.buffer.delete_range(line_start, line_start + plen);
+        if let Some(prefix) = parse_prefix(&current_line) {
+            if point.col <= prefix.prefix_len {
+                self.buffer
+                    .delete_range(line_start, line_start + prefix.prefix_len);
                 self.cursor.set_cursor(BufferOffset(line_start));
                 self.reset_blink(cx);
                 cx.notify();
@@ -238,8 +238,11 @@ Type anywhere to see live inline syntax formatting in action!
             }
         }
 
-        self.buffer.delete_range(pos - 1, pos);
-        self.cursor.set_cursor(BufferOffset(pos - 1));
+        // Grapheme-aware single delete
+        let text = self.buffer.text();
+        let prev = previous_grapheme_char_offset(&text, pos);
+        self.buffer.delete_range(prev, pos);
+        self.cursor.set_cursor(BufferOffset(prev));
         self.reset_blink(cx);
         cx.notify();
     }
@@ -254,8 +257,11 @@ Type anywhere to see live inline syntax formatting in action!
             return;
         }
         let pos = self.cursor.cursor_offset().get();
-        if pos < self.buffer.len_chars() {
-            self.buffer.delete_range(pos, pos + 1);
+        let len = self.buffer.len_chars();
+        if pos < len {
+            let text = self.buffer.text();
+            let next = next_grapheme_char_offset(&text, pos);
+            self.buffer.delete_range(pos, next);
             self.reset_blink(cx);
             cx.notify();
         }
@@ -271,18 +277,17 @@ Type anywhere to see live inline syntax formatting in action!
             .unwrap_or_default();
         let line_start = self.buffer.line_to_char(point.row);
 
-        let indent_len = current_line
-            .chars()
-            .take_while(|c| *c == ' ' || *c == '\t')
-            .count();
-        let indent_str: String = current_line.chars().take(indent_len).collect();
-        let after_indent = &current_line[indent_len..];
-
-        let digits = after_indent.chars().take_while(|c| c.is_ascii_digit()).count();
-        let prefix = if digits > 0 && after_indent[digits..].starts_with(". ") {
-            let num: usize = after_indent[..digits].parse().unwrap_or(1);
-            let item_text = after_indent[digits + 2..].trim();
-            if item_text.is_empty() {
+        let prefix_text = if let Some(prefix) = parse_prefix(&current_line) {
+            let content = prefix.content_owned(&current_line);
+            let item_empty = content.trim().is_empty()
+                && matches!(
+                    prefix.kind,
+                    LinePrefixKind::Task { .. }
+                        | LinePrefixKind::Unordered { .. }
+                        | LinePrefixKind::Ordered { .. }
+                        | LinePrefixKind::Blockquote { .. }
+                );
+            if item_empty {
                 self.buffer
                     .replace_range(line_start, self.cursor.cursor_offset().get(), "");
                 self.cursor.set_cursor(BufferOffset(line_start));
@@ -290,45 +295,20 @@ Type anywhere to see live inline syntax formatting in action!
                 cx.notify();
                 return;
             }
-            format!("{}{}. ", indent_str, num + 1)
-        } else if after_indent.starts_with("- [ ] ") || after_indent.starts_with("- [x] ") {
-            let item_text = after_indent[6..].trim();
-            if item_text.is_empty() {
-                self.buffer
-                    .replace_range(line_start, self.cursor.cursor_offset().get(), "");
-                self.cursor.set_cursor(BufferOffset(line_start));
-                self.reset_blink(cx);
-                cx.notify();
-                return;
-            }
-            format!("{}- [ ] ", indent_str)
-        } else if after_indent.starts_with("- ") || after_indent.starts_with("* ") {
-            let item_text = after_indent[2..].trim();
-            if item_text.is_empty() {
-                self.buffer
-                    .replace_range(line_start, self.cursor.cursor_offset().get(), "");
-                self.cursor.set_cursor(BufferOffset(line_start));
-                self.reset_blink(cx);
-                cx.notify();
-                return;
-            }
-            format!("{}- ", indent_str)
-        } else if after_indent.starts_with("> ") {
-            let item_text = after_indent[2..].trim();
-            if item_text.is_empty() {
-                self.buffer
-                    .replace_range(line_start, self.cursor.cursor_offset().get(), "");
-                self.cursor.set_cursor(BufferOffset(line_start));
-                self.reset_blink(cx);
-                cx.notify();
-                return;
-            }
-            format!("{}> ", indent_str)
+            prefix.continue_prefix().unwrap_or_else(|| {
+                current_line
+                    .chars()
+                    .take_while(|c| *c == ' ' || *c == '\t')
+                    .collect()
+            })
         } else {
-            indent_str
+            current_line
+                .chars()
+                .take_while(|c| *c == ' ' || *c == '\t')
+                .collect()
         };
 
-        let insert_str = format!("\n{}", prefix);
+        let insert_str = format!("\n{}", prefix_text);
         self.insert_text(&insert_str, cx);
     }
 
@@ -385,23 +365,17 @@ Type anywhere to see live inline syntax formatting in action!
 
     pub fn toggle_task_at_line(&mut self, line_idx: usize, cx: &mut Context<Self>) {
         if let Some(line) = self.buffer.line_without_newline(line_idx) {
-            let line_start = self.buffer.line_to_char(line_idx);
-            if line.starts_with("- [ ] ") {
-                let replaced = format!("- [x] {}", &line[6..]);
-                self.buffer.replace_range(
-                    line_start,
-                    line_start + line.chars().count(),
-                    &replaced,
-                );
-            } else if line.starts_with("- [x] ") || line.starts_with("- [X] ") {
-                let replaced = format!("- [ ] {}", &line[6..]);
-                self.buffer.replace_range(
-                    line_start,
-                    line_start + line.chars().count(),
-                    &replaced,
-                );
+            if let Some(prefix) = parse_prefix(&line) {
+                if let Some(replaced) = prefix.toggle_task_line(&line) {
+                    let line_start = self.buffer.line_to_char(line_idx);
+                    self.buffer.replace_range(
+                        line_start,
+                        line_start + line.chars().count(),
+                        &replaced,
+                    );
+                    cx.notify();
+                }
             }
-            cx.notify();
         }
     }
 
@@ -608,6 +582,7 @@ impl Render for EditorView {
         let border_color = rgb(theme.border_subtle);
 
         let total_lines = self.buffer.len_lines();
+        let parsed_doc = self.parsed_document();
         let word_count = self.word_count();
         let char_count = self.char_count();
         let sel_range = if self.cursor.selection.is_collapsed() {
@@ -738,7 +713,7 @@ impl Render for EditorView {
         for row in 0..total_lines {
             let raw_line = self.buffer.line_without_newline(row).unwrap_or_default();
             let is_active = row == current_row;
-            let decorated = self.decorate_row(row);
+            let decorated = self.decorate_parsed_row(row, &parsed_doc);
             let line_start = self.buffer.line_to_char(row);
             let line_len = raw_line.chars().count();
             let block_kind = decorated.block_kind.clone();
@@ -937,4 +912,12 @@ fn mode_chip(label: &'static str, active: bool, theme: &Theme) -> Div {
         })
         .font_weight(FontWeight::MEDIUM)
         .child(label)
+}
+
+fn previous_grapheme_char_offset(text: &str, char_offset: usize) -> usize {
+    crate::editor::selection::previous_grapheme_char_offset(text, char_offset)
+}
+
+fn next_grapheme_char_offset(text: &str, char_offset: usize) -> usize {
+    crate::editor::selection::next_grapheme_char_offset(text, char_offset)
 }
