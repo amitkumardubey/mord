@@ -47,7 +47,7 @@ Word-like behavior is Markdown in, Markdown out — testable without GPUI.
 - List/task/quote continuation matches the grammar (`* [ ]`, indent included)
 - Task click does not also move the caret; link click vs edit is explicit
 - `VisualRun` carries role (marker / emphasis / code / link / task), not font size; theme owns the type scale (one table, not 1.85 copied three times)
-- Conceal by role: structural prefixes (heading / list / task / quote) reveal for the **line**; inline markers reveal by **token `group_range`**. Drop the global TokenReveal vs LineReveal switch; keep `Raw` as the source overlay
+- Conceal by role: structural prefixes (heading / list / task / quote) reveal for the **line**; inline markers reveal by **token `group_range`**. `ConcealMode::{Live, Raw}` — no global Token vs Line switch
 - Discoverable Bold / Italic / Code; Tab / Shift+Tab indent
 - `EditorView` binds input and paints layout; it does not re-detect prefixes
 

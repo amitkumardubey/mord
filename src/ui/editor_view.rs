@@ -1,10 +1,10 @@
 use crate::editor::{
     buffer::DocumentBuffer,
+    commands::{self, WrapKind},
     decorator::{ConcealMode, Decorator},
     layout::hit_test_wrapped_line,
     offset::BufferOffset,
     parser::{BlockKind, MarkdownParser},
-    prefix::{parse_prefix, LinePrefixKind},
     selection::CursorManager,
 };
 use crate::ui::document_line::{DocumentLine, LineCacheMap};
@@ -56,7 +56,7 @@ Type anywhere to see live inline syntax formatting in action!
         let mut view = Self {
             buffer: DocumentBuffer::from_str(sample_text),
             cursor: CursorManager::new(),
-            conceal_mode: ConcealMode::TokenReveal,
+            conceal_mode: ConcealMode::Live,
             theme: Theme::dark(),
             focus_handle: focus_handle.clone(),
             dragging: false,
@@ -143,7 +143,19 @@ Type anywhere to see live inline syntax formatting in action!
                 &self.buffer.line_without_newline(row).unwrap_or_default(),
             )
         });
-        Decorator::decorate_line(row, &parsed, cursor_col, self.conceal_mode)
+        let scale = match parsed.block_kind {
+            BlockKind::Heading { level } => self.theme.heading_scale(level),
+            _ => 1.0,
+        };
+        Decorator::decorate_line(row, &parsed, cursor_col, self.conceal_mode, scale)
+    }
+
+    fn apply_edit(&mut self, edit: commands::Edit, cx: &mut Context<Self>) {
+        let caret = edit.apply(&mut self.buffer);
+        self.cursor.set_cursor(BufferOffset(caret));
+        self.reset_blink(cx);
+        self.scroll_caret_into_view();
+        cx.notify();
     }
 
     fn scroll_caret_into_view(&self) {
@@ -172,79 +184,10 @@ Type anywhere to see live inline syntax formatting in action!
     }
 
     pub fn backspace(&mut self, cx: &mut Context<Self>) {
-        if !self.cursor.selection.is_collapsed() {
-            let range = self.cursor.selection.range();
-            self.buffer.delete_range(range.start, range.end);
-            self.cursor.set_cursor(BufferOffset(range.start));
-            self.reset_blink(cx);
-            cx.notify();
-            return;
+        let range = self.cursor.selection.range();
+        if let Some(edit) = commands::backspace(&self.buffer, range.start, range.end) {
+            self.apply_edit(edit, cx);
         }
-        let pos = self.cursor.cursor_offset().get();
-        if pos == 0 {
-            return;
-        }
-
-        let point = self.buffer.char_offset_to_point(pos);
-        let current_line = self
-            .buffer
-            .line_without_newline(point.row)
-            .unwrap_or_default();
-        let line_start = self.buffer.line_to_char(point.row);
-
-        if point.col == 0 {
-            if point.row > 0 {
-                let prev_line = self
-                    .buffer
-                    .line_without_newline(point.row - 1)
-                    .unwrap_or_default();
-                let prev_line_start = self.buffer.line_to_char(point.row - 1);
-                let prev_line_len = prev_line.chars().count();
-                let join_point = prev_line_start + prev_line_len;
-
-                self.buffer.delete_range(join_point, line_start);
-                self.cursor.set_cursor(BufferOffset(join_point));
-                self.reset_blink(cx);
-                cx.notify();
-            }
-            return;
-        }
-
-        let indent_len = current_line
-            .chars()
-            .take_while(|c| *c == ' ' || *c == '\t')
-            .count();
-        if point.col > 0 && point.col <= indent_len {
-            let delete_count = if current_line[..point.col].ends_with("    ") {
-                4
-            } else {
-                1
-            };
-            self.buffer.delete_range(pos - delete_count, pos);
-            self.cursor.set_cursor(BufferOffset(pos - delete_count));
-            self.reset_blink(cx);
-            cx.notify();
-            return;
-        }
-
-        if let Some(prefix) = parse_prefix(&current_line) {
-            if point.col <= prefix.prefix_len {
-                self.buffer
-                    .delete_range(line_start, line_start + prefix.prefix_len);
-                self.cursor.set_cursor(BufferOffset(line_start));
-                self.reset_blink(cx);
-                cx.notify();
-                return;
-            }
-        }
-
-        // Grapheme-aware single delete
-        let text = self.buffer.text();
-        let prev = previous_grapheme_char_offset(&text, pos);
-        self.buffer.delete_range(prev, pos);
-        self.cursor.set_cursor(BufferOffset(prev));
-        self.reset_blink(cx);
-        cx.notify();
     }
 
     pub fn delete_forward(&mut self, cx: &mut Context<Self>) {
@@ -268,115 +211,53 @@ Type anywhere to see live inline syntax formatting in action!
     }
 
     pub fn insert_newline(&mut self, cx: &mut Context<Self>) {
-        let point = self
-            .buffer
-            .char_offset_to_point(self.cursor.cursor_offset().get());
-        let current_line = self
-            .buffer
-            .line_without_newline(point.row)
-            .unwrap_or_default();
-        let line_start = self.buffer.line_to_char(point.row);
-
-        let prefix_text = if let Some(prefix) = parse_prefix(&current_line) {
-            let content = prefix.content_owned(&current_line);
-            let item_empty = content.trim().is_empty()
-                && matches!(
-                    prefix.kind,
-                    LinePrefixKind::Task { .. }
-                        | LinePrefixKind::Unordered { .. }
-                        | LinePrefixKind::Ordered { .. }
-                        | LinePrefixKind::Blockquote { .. }
-                );
-            if item_empty {
-                self.buffer
-                    .replace_range(line_start, self.cursor.cursor_offset().get(), "");
-                self.cursor.set_cursor(BufferOffset(line_start));
-                self.reset_blink(cx);
-                cx.notify();
-                return;
-            }
-            prefix.continue_prefix().unwrap_or_else(|| {
-                current_line
-                    .chars()
-                    .take_while(|c| *c == ' ' || *c == '\t')
-                    .collect()
-            })
-        } else {
-            current_line
-                .chars()
-                .take_while(|c| *c == ' ' || *c == '\t')
-                .collect()
-        };
-
-        let insert_str = format!("\n{}", prefix_text);
-        self.insert_text(&insert_str, cx);
+        if !self.cursor.selection.is_collapsed() {
+            let range = self.cursor.selection.range();
+            self.buffer.replace_range(range.start, range.end, "");
+            self.cursor.set_cursor(BufferOffset(range.start));
+        }
+        let caret = self.cursor.cursor_offset().get();
+        let edit = commands::insert_newline(&self.buffer, caret);
+        self.apply_edit(edit, cx);
     }
 
     pub fn toggle_bold(&mut self, cx: &mut Context<Self>) {
-        if self.cursor.selection.is_collapsed() {
-            self.insert_text("****", cx);
-            self.cursor
-                .set_cursor(self.cursor.cursor_offset() - 2);
-        } else {
-            let range = self.cursor.selection.range();
-            let selected = self.buffer.slice_to_string(range.start, range.end);
-            let wrapped = format!("**{}**", selected);
-            self.buffer.replace_range(range.start, range.end, &wrapped);
-            self.cursor
-                .set_cursor(BufferOffset(range.start + wrapped.chars().count()));
-        }
-        self.reset_blink(cx);
-        cx.notify();
+        let range = self.cursor.selection.range();
+        let edit = commands::wrap_marks(&self.buffer, range.start, range.end, WrapKind::Bold);
+        self.apply_edit(edit, cx);
     }
 
     pub fn toggle_italic(&mut self, cx: &mut Context<Self>) {
-        if self.cursor.selection.is_collapsed() {
-            self.insert_text("**", cx);
-            self.cursor
-                .set_cursor(self.cursor.cursor_offset() - 1);
-        } else {
-            let range = self.cursor.selection.range();
-            let selected = self.buffer.slice_to_string(range.start, range.end);
-            let wrapped = format!("*{}*", selected);
-            self.buffer.replace_range(range.start, range.end, &wrapped);
-            self.cursor
-                .set_cursor(BufferOffset(range.start + wrapped.chars().count()));
-        }
-        self.reset_blink(cx);
-        cx.notify();
+        let range = self.cursor.selection.range();
+        let edit = commands::wrap_marks(&self.buffer, range.start, range.end, WrapKind::Italic);
+        self.apply_edit(edit, cx);
     }
 
     pub fn toggle_code(&mut self, cx: &mut Context<Self>) {
-        if self.cursor.selection.is_collapsed() {
-            self.insert_text("``", cx);
-            self.cursor
-                .set_cursor(self.cursor.cursor_offset() - 1);
-        } else {
-            let range = self.cursor.selection.range();
-            let selected = self.buffer.slice_to_string(range.start, range.end);
-            let wrapped = format!("`{}`", selected);
-            self.buffer.replace_range(range.start, range.end, &wrapped);
-            self.cursor
-                .set_cursor(BufferOffset(range.start + wrapped.chars().count()));
-        }
-        self.reset_blink(cx);
-        cx.notify();
+        let range = self.cursor.selection.range();
+        let edit = commands::wrap_marks(&self.buffer, range.start, range.end, WrapKind::Code);
+        self.apply_edit(edit, cx);
     }
 
     pub fn toggle_task_at_line(&mut self, line_idx: usize, cx: &mut Context<Self>) {
-        if let Some(line) = self.buffer.line_without_newline(line_idx) {
-            if let Some(prefix) = parse_prefix(&line) {
-                if let Some(replaced) = prefix.toggle_task_line(&line) {
-                    let line_start = self.buffer.line_to_char(line_idx);
-                    self.buffer.replace_range(
-                        line_start,
-                        line_start + line.chars().count(),
-                        &replaced,
-                    );
-                    cx.notify();
-                }
-            }
+        let caret = self.cursor.cursor_offset().get();
+        if let Some(mut edit) = commands::toggle_task(&self.buffer, line_idx) {
+            edit.caret = caret; // preserve caret on glyph click
+            let _ = edit.apply(&mut self.buffer);
+            cx.notify();
         }
+    }
+
+    pub fn indent_selection(&mut self, cx: &mut Context<Self>) {
+        let range = self.cursor.selection.range();
+        let edit = commands::indent_lines(&self.buffer, range.start, range.end);
+        self.apply_edit(edit, cx);
+    }
+
+    pub fn outdent_selection(&mut self, cx: &mut Context<Self>) {
+        let range = self.cursor.selection.range();
+        let edit = commands::outdent_lines(&self.buffer, range.start, range.end);
+        self.apply_edit(edit, cx);
     }
 
     pub fn word_count(&self) -> usize {
@@ -540,7 +421,11 @@ Type anywhere to see live inline syntax formatting in action!
                 cx.notify();
             }
             "tab" => {
-                self.insert_text("    ", cx);
+                if modifiers.shift {
+                    self.outdent_selection(cx);
+                } else {
+                    self.indent_selection(cx);
+                }
             }
             _ => {
                 if let Some(ch) = &event.keystroke.key_char {
@@ -645,35 +530,59 @@ impl Render for EditorView {
                 div()
                     .flex()
                     .items_center()
-                    .p_1()
-                    .rounded_lg()
-                    .bg(rgb(theme.bg_code_inline))
-                    .gap_1()
+                    .gap_2()
                     .child(
-                        mode_chip("Token", self.conceal_mode == ConcealMode::TokenReveal, theme)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|view, _, _, cx| {
-                                    view.set_conceal_mode(ConcealMode::TokenReveal, cx);
-                                }),
+                        div()
+                            .flex()
+                            .items_center()
+                            .p_1()
+                            .rounded_lg()
+                            .bg(rgb(theme.bg_code_inline))
+                            .gap_1()
+                            .child(
+                                mode_chip("B", false, theme).on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|view, _, _, cx| view.toggle_bold(cx)),
+                                ),
+                            )
+                            .child(
+                                mode_chip("I", false, theme).on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|view, _, _, cx| view.toggle_italic(cx)),
+                                ),
+                            )
+                            .child(
+                                mode_chip("Code", false, theme).on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|view, _, _, cx| view.toggle_code(cx)),
+                                ),
                             ),
                     )
                     .child(
-                        mode_chip("Line", self.conceal_mode == ConcealMode::LineReveal, theme)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|view, _, _, cx| {
-                                    view.set_conceal_mode(ConcealMode::LineReveal, cx);
-                                }),
-                            ),
-                    )
-                    .child(
-                        mode_chip("Raw", self.conceal_mode == ConcealMode::Raw, theme)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|view, _, _, cx| {
-                                    view.set_conceal_mode(ConcealMode::Raw, cx);
-                                }),
+                        div()
+                            .flex()
+                            .items_center()
+                            .p_1()
+                            .rounded_lg()
+                            .bg(rgb(theme.bg_code_inline))
+                            .gap_1()
+                            .child(
+                                mode_chip("Live", self.conceal_mode == ConcealMode::Live, theme)
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|view, _, _, cx| {
+                                            view.set_conceal_mode(ConcealMode::Live, cx);
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                mode_chip("Raw", self.conceal_mode == ConcealMode::Raw, theme)
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|view, _, _, cx| {
+                                            view.set_conceal_mode(ConcealMode::Raw, cx);
+                                        }),
+                                    ),
                             ),
                     ),
             )
@@ -824,8 +733,7 @@ impl Render for EditorView {
         }
 
         let mode_label = match self.conceal_mode {
-            ConcealMode::TokenReveal => "Token Reveal",
-            ConcealMode::LineReveal => "Line Reveal",
+            ConcealMode::Live => "Live",
             ConcealMode::Raw => "Raw",
         };
 
@@ -912,10 +820,6 @@ fn mode_chip(label: &'static str, active: bool, theme: &Theme) -> Div {
         })
         .font_weight(FontWeight::MEDIUM)
         .child(label)
-}
-
-fn previous_grapheme_char_offset(text: &str, char_offset: usize) -> usize {
-    crate::editor::selection::previous_grapheme_char_offset(text, char_offset)
 }
 
 fn next_grapheme_char_offset(text: &str, char_offset: usize) -> usize {

@@ -29,11 +29,20 @@ pub struct LinePaintTheme {
     pub task_checked: u32,
     pub font_size_base: f32,
     pub line_height_base: f32,
+    pub heading_scales: [f32; 6],
 }
 
 impl LinePaintTheme {
     pub fn hsla(hex: u32) -> Hsla {
         Hsla::from(rgb(hex))
+    }
+
+    pub fn heading_scale(&self, level: usize) -> f32 {
+        if (1..=6).contains(&level) {
+            self.heading_scales[level - 1]
+        } else {
+            1.0
+        }
     }
 }
 
@@ -148,6 +157,8 @@ fn visual_run_to_text_run(
     is_active_line: bool,
     byte_len: usize,
 ) -> TextRun {
+    use crate::editor::decorator::VisualRole;
+
     let mut font = base_font.clone();
     match run.font_weight {
         VisualFontWeight::Bold | VisualFontWeight::ExtraBold => {
@@ -160,36 +171,41 @@ fn visual_run_to_text_run(
     }
 
     let mut color = LinePaintTheme::hsla(theme.text_primary);
-    if run.font_size_scale > 1.2 {
-        color = LinePaintTheme::hsla(theme.text_heading);
-    }
-    if run.is_marker {
-        color = if is_active_line {
-            LinePaintTheme::hsla(theme.text_marker_active)
-        } else {
-            LinePaintTheme::hsla(theme.text_marker_dimmed)
-        };
-    }
-    if run.is_code {
-        color = LinePaintTheme::hsla(theme.code_accent);
-    }
-    if run.link_url.is_some() {
-        color = LinePaintTheme::hsla(theme.text_link);
-    }
-    if matches!(
-        run.marker_type,
-        Some(MarkerType::TaskListMarker { checked: true })
-    ) {
-        color = LinePaintTheme::hsla(theme.task_checked);
+    match run.role {
+        VisualRole::Heading => {
+            color = LinePaintTheme::hsla(theme.text_heading);
+        }
+        VisualRole::StructuralMarker | VisualRole::InlineMarker => {
+            color = if is_active_line {
+                LinePaintTheme::hsla(theme.text_marker_active)
+            } else {
+                LinePaintTheme::hsla(theme.text_marker_dimmed)
+            };
+        }
+        VisualRole::Code => {
+            color = LinePaintTheme::hsla(theme.code_accent);
+        }
+        VisualRole::Link => {
+            color = LinePaintTheme::hsla(theme.text_link);
+        }
+        VisualRole::TaskGlyph => {
+            if matches!(
+                run.marker_type,
+                Some(MarkerType::TaskListMarker { checked: true })
+            ) {
+                color = LinePaintTheme::hsla(theme.task_checked);
+            }
+        }
+        VisualRole::Emphasis | VisualRole::Plain => {}
     }
 
-    let background_color = if run.is_code {
+    let background_color = if run.role == VisualRole::Code {
         Some(LinePaintTheme::hsla(theme.bg_code_inline))
     } else {
         None
     };
 
-    let underline = if run.link_url.is_some() {
+    let underline = if run.role == VisualRole::Link || run.link_url.is_some() {
         Some(UnderlineStyle {
             thickness: px(1.0),
             color: Some(color),
@@ -360,12 +376,14 @@ pub fn hit_test_wrapped_line(
 }
 
 fn point_on_task_marker(decorated: &DecoratedLine, visual_col: VisualCol) -> bool {
+    use crate::editor::decorator::VisualRole;
     let mut offset = 0usize;
     for run in &decorated.visual_runs {
         let run_len = run.text.chars().count();
         let run_end = offset + run_len;
         if visual_col.get() >= offset && visual_col.get() < run_end {
-            return matches!(run.marker_type, Some(MarkerType::TaskListMarker { .. }));
+            return run.role == VisualRole::TaskGlyph
+                || matches!(run.marker_type, Some(MarkerType::TaskListMarker { .. }));
         }
         offset = run_end;
     }
@@ -381,7 +399,7 @@ mod tests {
     #[test]
     fn selection_range_on_concealed_heading() {
         let parsed = MarkdownParser::parse_line("### My Title");
-        let decorated = Decorator::decorate_line(0, &parsed, None, ConcealMode::TokenReveal);
+        let decorated = Decorator::decorate_line(0, &parsed, None, ConcealMode::Live, 1.30);
         let range = line_selection_visual_range(&decorated, 0, 12, 4, 6).unwrap();
         assert_eq!(range.start, VisualCol(0));
         assert_eq!(range.end, VisualCol(2));

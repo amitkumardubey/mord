@@ -46,17 +46,17 @@ Edit log:
 
 ## Then — commands, then a thin view
 
-- [ ] Commands module: wrap marks, continue/exit list, toggle task, indent — each returns one `Edit`; tests without GPUI
-- [ ] Enter on `* [ ]` / indented tasks continues a task item; empty item exits the list
-- [ ] Toggle task matches every form the grammar accepts
-- [ ] Task glyph click toggles without also moving the caret
-- [ ] Link click vs caret placement is defined (edit source vs open)
-- [ ] `VisualRun` is role + source range + text; font size/color come from theme at layout time
-- [ ] One heading type-scale table in `Theme` (`line_height_base` used); delete the 1.85 copies in decorator / click / paint
-- [ ] Conceal by role: heading/list/task/quote prefixes reveal for the line; inline markers reveal by `group_range`; drop global Token vs Line; keep `Raw`
-- [ ] Toolbar or equivalent for Bold / Italic / Code
-- [ ] Tab / Shift+Tab indent and outdent the line or selection
-- [ ] `EditorView` only binds input and paints layout (no prefix re-detection)
+- [x] Commands module: wrap marks, continue/exit list, toggle task, indent — each returns one `Edit`; tests without GPUI
+- [x] Enter on `* [ ]` / indented tasks continues a task item; empty item exits the list
+- [x] Toggle task matches every form the grammar accepts
+- [x] Task glyph click toggles without also moving the caret
+- [x] Link click vs caret placement is defined (edit source vs open)
+- [x] `VisualRun` is role + source range + text; font size/color come from theme at layout time
+- [x] One heading type-scale table in `Theme` (`line_height_base` used); delete the 1.85 copies in decorator / click / paint
+- [x] Conceal by role: heading/list/task/quote prefixes reveal for the line; inline markers reveal by `group_range`; drop global Token vs Line; keep `Raw`
+- [x] Toolbar or equivalent for Bold / Italic / Code
+- [x] Tab / Shift+Tab indent and outdent the line or selection
+- [x] `EditorView` only binds input and paints layout (no prefix re-detection)
 
 ## Later — app and incrementality
 

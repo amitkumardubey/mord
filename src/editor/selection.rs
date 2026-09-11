@@ -263,7 +263,12 @@ mod tests {
 
     fn decorate(line: &str, cursor_col: Option<usize>) -> DecoratedLine {
         let parsed = MarkdownParser::parse_line(line);
-        Decorator::decorate_line(0, &parsed, cursor_col, ConcealMode::TokenReveal)
+        let scale = match parsed.block_kind {
+            crate::editor::BlockKind::Heading { level: 3 } => 1.30,
+            crate::editor::BlockKind::Heading { level: 1 } => 1.85,
+            _ => 1.0,
+        };
+        Decorator::decorate_line(0, &parsed, cursor_col, ConcealMode::Live, scale)
     }
 
     #[test]

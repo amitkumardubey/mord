@@ -20,30 +20,33 @@ pub struct Theme {
     pub cursor_color: u32,
     pub font_size_base: f32,
     pub line_height_base: f32,
+    /// Font-size multipliers for heading levels 1..=6 (index 0 = H1).
+    pub heading_scales: [f32; 6],
 }
 
 impl Theme {
     /// Sleek Modern Dark Theme inspired by Obsidian & Zed
     pub fn dark() -> Self {
         Self {
-            bg_app: 0x18181B,             // Zinc 900
-            bg_editor: 0x121214,          // Deep dark editor background
-            bg_active_line: 0x1F1F24,     // Subtle highlight for active line
-            bg_code_inline: 0x27272A,     // Zinc 800 pill background
-            bg_code_block: 0x1E1E22,      // Code block background
-            bg_selection: 0x3F3F46,       // Selection tint
-            text_primary: 0xE4E4E7,       // Zinc 200 (crisp readable text)
-            text_muted: 0x71717A,         // Zinc 500
-            text_marker_dimmed: 0x52525B, // Zinc 600 (faded syntax tokens)
-            text_marker_active: 0x38BDF8, // Sky 400 (active editable markers)
-            text_accent: 0x60A5FA,        // Blue 400
-            text_heading: 0xFAFAFA,       // Zinc 50 (extra crisp headings)
-            text_link: 0x38BDF8,          // Sky 400
-            border_subtle: 0x27272A,      // Zinc 800
-            border_quote: 0x6366F1,       // Indigo 500 (quote left bar)
-            cursor_color: 0x60A5FA,       // Electric blue caret
+            bg_app: 0x18181B,
+            bg_editor: 0x121214,
+            bg_active_line: 0x1F1F24,
+            bg_code_inline: 0x27272A,
+            bg_code_block: 0x1E1E22,
+            bg_selection: 0x3F3F46,
+            text_primary: 0xE4E4E7,
+            text_muted: 0x71717A,
+            text_marker_dimmed: 0x52525B,
+            text_marker_active: 0x38BDF8,
+            text_accent: 0x60A5FA,
+            text_heading: 0xFAFAFA,
+            text_link: 0x38BDF8,
+            border_subtle: 0x27272A,
+            border_quote: 0x6366F1,
+            cursor_color: 0x60A5FA,
             font_size_base: 16.0,
             line_height_base: 26.0,
+            heading_scales: [1.85, 1.55, 1.30, 1.15, 1.05, 1.0],
         }
     }
 
@@ -68,6 +71,15 @@ impl Theme {
             cursor_color: 0x2563EB,
             font_size_base: 16.0,
             line_height_base: 26.0,
+            heading_scales: [1.85, 1.55, 1.30, 1.15, 1.05, 1.0],
+        }
+    }
+
+    pub fn heading_scale(&self, level: usize) -> f32 {
+        if (1..=6).contains(&level) {
+            self.heading_scales[level - 1]
+        } else {
+            1.0
         }
     }
 
@@ -85,6 +97,7 @@ impl Theme {
             task_checked: 0x34D399,
             font_size_base: self.font_size_base,
             line_height_base: self.line_height_base,
+            heading_scales: self.heading_scales,
         }
     }
 }
