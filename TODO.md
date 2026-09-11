@@ -22,7 +22,7 @@ Layout is a stage, not a guess:
 
 - [x] Shaped-text layout object: glyph x/width, visual index, buffer index — paint, click, and caret all use it
 - [x] Drop guessed 5.0 / 8.5 / 12.5 widths and the hardcoded 72px click origin
-- [ ] Wrap lines on words, not `flex_wrap` at style-run edges (shape_line for now; `shape_text` wrap next)
+- [x] Wrap lines on words via GPUI `shape_text` (measured height; hit-test/caret/selection follow wraps)
 - [x] Tests: visual ↔ buffer for concealed heading; Up/Down from heading onto paragraph; selection uses the same map as the caret
 
 ## Next — document parse and a real edit log

@@ -9,8 +9,8 @@ use crate::editor::decorator::{
 use crate::editor::offset::{byte_to_char_index, char_to_byte_index, BufferCol, VisualCol};
 use crate::editor::parser::MarkerType;
 use gpui_kit::gpui::{
-    Font, FontStyle, FontWeight, Hsla, Pixels, ShapedLine, SharedString, StrikethroughStyle,
-    TextRun, UnderlineStyle, px, rgb,
+    point, px, rgb, size, Bounds, Font, FontStyle, FontWeight, Hsla, Pixels, Point, SharedString,
+    StrikethroughStyle, TextRun, UnderlineStyle, WrappedLine,
 };
 use std::ops::Range;
 
@@ -218,23 +218,41 @@ fn visual_run_to_text_run(
     }
 }
 
-pub fn visual_col_for_x(shaped: &ShapedLine, display_text: &str, x: Pixels) -> VisualCol {
-    let byte_idx = shaped.closest_index_for_x(x);
+fn byte_index_from_closest(result: Result<usize, usize>) -> usize {
+    match result {
+        Ok(i) | Err(i) => i,
+    }
+}
+
+pub fn visual_col_for_position(
+    wrapped: &WrappedLine,
+    display_text: &str,
+    local: Point<Pixels>,
+    line_height: Pixels,
+) -> VisualCol {
     if display_text.is_empty() {
         return VisualCol(0);
     }
+    let byte_idx = byte_index_from_closest(wrapped.closest_index_for_position(local, line_height));
     VisualCol(byte_to_char_index(
         display_text,
         byte_idx.min(display_text.len()),
     ))
 }
 
-pub fn x_for_visual_col(shaped: &ShapedLine, display_text: &str, col: VisualCol) -> Pixels {
+pub fn position_for_visual_col(
+    wrapped: &WrappedLine,
+    display_text: &str,
+    col: VisualCol,
+    line_height: Pixels,
+) -> Point<Pixels> {
     if display_text.is_empty() {
-        return px(0.0);
+        return point(px(0.0), px(0.0));
     }
     let byte_idx = char_to_byte_index(display_text, col.get());
-    shaped.x_for_index(byte_idx)
+    wrapped
+        .position_for_index(byte_idx, line_height)
+        .unwrap_or_else(|| point(px(0.0), px(0.0)))
 }
 
 /// Map a document-level selection onto visual char columns within one line.
@@ -263,13 +281,71 @@ pub fn line_selection_visual_range(
     Some(VisualCol(v_start)..VisualCol(v_end.max(v_start)))
 }
 
-pub fn hit_test_line(
-    shaped: &ShapedLine,
+/// Selection highlight rects for a visual range, accounting for soft wrap.
+pub fn selection_bounds(
+    wrapped: &WrappedLine,
+    display_text: &str,
+    visual: Range<VisualCol>,
+    origin: Point<Pixels>,
+    line_height: Pixels,
+) -> Vec<Bounds<Pixels>> {
+    if display_text.is_empty() || visual.start >= visual.end {
+        return Vec::new();
+    }
+    let byte_start = char_to_byte_index(display_text, visual.start.get());
+    let byte_end = char_to_byte_index(display_text, visual.end.get());
+    let Some(p0) = wrapped.position_for_index(byte_start, line_height) else {
+        return Vec::new();
+    };
+    let Some(p1) = wrapped.position_for_index(byte_end, line_height) else {
+        return Vec::new();
+    };
+    let wrap_w = wrapped.width().max(px(2.0));
+
+    if p0.y == p1.y {
+        return vec![Bounds::from_corners(
+            point(origin.x + p0.x, origin.y + p0.y),
+            point(
+                origin.x + p1.x.max(p0.x + px(2.0)),
+                origin.y + p0.y + line_height,
+            ),
+        )];
+    }
+
+    let mut rects = Vec::new();
+    // First wrapped row: from caret x to wrap width
+    rects.push(Bounds::from_corners(
+        point(origin.x + p0.x, origin.y + p0.y),
+        point(origin.x + wrap_w, origin.y + p0.y + line_height),
+    ));
+    // Middle full rows
+    let mut y = p0.y + line_height;
+    while y < p1.y {
+        rects.push(Bounds::new(
+            point(origin.x, origin.y + y),
+            size(wrap_w, line_height),
+        ));
+        y = y + line_height;
+    }
+    // Last wrapped row
+    rects.push(Bounds::from_corners(
+        point(origin.x, origin.y + p1.y),
+        point(
+            origin.x + p1.x.max(px(2.0)),
+            origin.y + p1.y + line_height,
+        ),
+    ));
+    rects
+}
+
+pub fn hit_test_wrapped_line(
+    wrapped: &WrappedLine,
     decorated: &DecoratedLine,
     line_len: usize,
-    local_x: Pixels,
+    local: Point<Pixels>,
+    line_height: Pixels,
 ) -> LineHitResult {
-    let visual_col = visual_col_for_x(shaped, &decorated.display_text, local_x);
+    let visual_col = visual_col_for_position(wrapped, &decorated.display_text, local, line_height);
     let buffer_col = BufferCol(crate::editor::decorator::Decorator::visual_col_to_buffer_col(
         decorated,
         visual_col.get(),

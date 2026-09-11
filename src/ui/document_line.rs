@@ -1,23 +1,25 @@
-//! One document line: GPUI-shaped text, overlay caret, selection highlight.
+//! One document line: GPUI soft-wrapped shaped text, overlay caret, selection.
 
 use crate::editor::decorator::DecoratedLine;
 use crate::editor::layout::{
-    build_shaped_line_input, line_selection_visual_range, x_for_visual_col, LinePaintTheme,
+    build_shaped_line_input, line_selection_visual_range, position_for_visual_col, selection_bounds,
+    LinePaintTheme,
 };
 use crate::editor::offset::VisualCol;
 use gpui_kit::gpui::{
-    fill, point, px, size, App, Bounds, Element, ElementId, GlobalElementId, IntoElement, LayoutId,
-    PaintQuad, Pixels, ShapedLine, Style, TextAlign, Window,
+    fill, point, px, size, App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId,
+    IntoElement, LayoutId, PaintQuad, Pixels, Style, TextAlign, Window, WrappedLine,
 };
+use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
-use std::cell::RefCell;
 
-/// Cached shaped line + bounds for hit-testing after paint.
+/// Cached bounds + wrap metrics for hit-testing (reshape on click with same wrap width).
 #[derive(Clone)]
 pub struct LinePaintCache {
     pub bounds: Bounds<Pixels>,
-    pub shaped: ShapedLine,
+    pub wrap_width: Pixels,
+    pub line_height: Pixels,
     pub display_text: String,
     pub line_len: usize,
 }
@@ -33,17 +35,17 @@ pub struct DocumentLine {
     pub is_active: bool,
     pub caret_visual_col: Option<VisualCol>,
     pub caret_visible: bool,
-    /// Document-level selection range (char offsets), if any.
     pub selection: Option<Range<usize>>,
     pub line_caches: LineCacheMap,
 }
 
 pub struct PrepaintState {
-    shaped: ShapedLine,
+    wrapped: WrappedLine,
     display_text: String,
     caret: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
+    selection: Vec<PaintQuad>,
     line_height: Pixels,
+    wrap_width: Pixels,
 }
 
 impl IntoElement for DocumentLine {
@@ -71,18 +73,46 @@ impl Element for DocumentLine {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&gpui_kit::gpui::InspectorElementId>,
         window: &mut Window,
-        cx: &mut App,
+        _cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let input = build_shaped_line_input(
-            &self.decorated,
-            &self.paint_theme,
-            window.text_style().font(),
-            self.is_active,
-        );
+        let decorated = self.decorated.clone();
+        let paint_theme = self.paint_theme;
+        let is_active = self.is_active;
+
         let mut style = Style::default();
         style.size.width = gpui_kit::gpui::relative(1.).into();
-        style.size.height = input.line_height.into();
-        (window.request_layout(style, [], cx), ())
+
+        let layout_id = window.request_measured_layout(style, move |known, available, window, _cx| {
+            let wrap_width = known.width.or(match available.width {
+                AvailableSpace::Definite(w) => Some(w),
+                _ => None,
+            });
+            let input = build_shaped_line_input(
+                &decorated,
+                &paint_theme,
+                window.text_style().font(),
+                is_active,
+            );
+            let height = match window.text_system().shape_text(
+                input.text.clone(),
+                input.font_size,
+                &input.runs,
+                wrap_width,
+                None,
+            ) {
+                Ok(lines) => lines
+                    .first()
+                    .map(|line| line.size(input.line_height).height)
+                    .unwrap_or(input.line_height),
+                Err(_) => input.line_height,
+            };
+            let width = wrap_width.unwrap_or_else(|| match available.width {
+                AvailableSpace::Definite(w) => w,
+                _ => px(0.0),
+            });
+            size(width, height)
+        });
+        (layout_id, ())
     }
 
     fn prepaint(
@@ -100,40 +130,62 @@ impl Element for DocumentLine {
             window.text_style().font(),
             self.is_active,
         );
-        let shaped = window.text_system().shape_line(
-            input.text.clone(),
-            input.font_size,
-            &input.runs,
-            None,
-        );
+        let wrap_width = bounds.size.width;
+        let wrapped = window
+            .text_system()
+            .shape_text(
+                input.text.clone(),
+                input.font_size,
+                &input.runs,
+                Some(wrap_width),
+                None,
+            )
+            .ok()
+            .and_then(|mut lines| lines.pop())
+            .or_else(|| {
+                window
+                    .text_system()
+                    .shape_text(input.text, input.font_size, &input.runs, None, None)
+                    .ok()
+                    .and_then(|mut lines| lines.pop())
+            })
+            .expect("shape_text must succeed for document line");
+
         let display_text = self.decorated.display_text.clone();
         let line_height = input.line_height;
 
-        let selection = self.selection.as_ref().and_then(|sel| {
-            let visual = line_selection_visual_range(
-                &self.decorated,
-                self.line_start,
-                self.line_len,
-                sel.start,
-                sel.end,
-            )?;
-            let x0 = x_for_visual_col(&shaped, &display_text, visual.start);
-            let x1 = x_for_visual_col(&shaped, &display_text, visual.end);
-            Some(fill(
-                Bounds::from_corners(
-                    point(bounds.left() + x0, bounds.top()),
-                    point(bounds.left() + x1.max(x0 + px(2.0)), bounds.bottom()),
-                ),
-                LinePaintTheme::hsla(self.paint_theme.bg_selection),
-            ))
-        });
+        let selection = self
+            .selection
+            .as_ref()
+            .and_then(|sel| {
+                line_selection_visual_range(
+                    &self.decorated,
+                    self.line_start,
+                    self.line_len,
+                    sel.start,
+                    sel.end,
+                )
+            })
+            .map(|visual| {
+                selection_bounds(
+                    &wrapped,
+                    &display_text,
+                    visual,
+                    bounds.origin,
+                    line_height,
+                )
+                .into_iter()
+                .map(|b| fill(b, LinePaintTheme::hsla(self.paint_theme.bg_selection)))
+                .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
         let caret = if self.is_active && self.caret_visible {
             let col = self.caret_visual_col.unwrap_or(VisualCol(0));
-            let x = x_for_visual_col(&shaped, &display_text, col);
+            let local = position_for_visual_col(&wrapped, &display_text, col, line_height);
             Some(fill(
                 Bounds::new(
-                    point(bounds.left() + x, bounds.top()),
+                    point(bounds.left() + local.x, bounds.top() + local.y),
                     size(px(2.0), line_height),
                 ),
                 LinePaintTheme::hsla(self.paint_theme.cursor_color),
@@ -143,11 +195,12 @@ impl Element for DocumentLine {
         };
 
         PrepaintState {
-            shaped,
+            wrapped,
             display_text,
             caret,
             selection,
             line_height,
+            wrap_width,
         }
     }
 
@@ -161,16 +214,15 @@ impl Element for DocumentLine {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
+        for quad in prepaint.selection.drain(..) {
+            window.paint_quad(quad);
         }
 
-        let shaped = prepaint.shaped.clone();
-        let _ = shaped.paint(
+        let _ = prepaint.wrapped.paint(
             bounds.origin,
             prepaint.line_height,
             TextAlign::Left,
-            None,
+            Some(bounds),
             window,
             cx,
         );
@@ -183,7 +235,8 @@ impl Element for DocumentLine {
             self.line_index,
             LinePaintCache {
                 bounds,
-                shaped,
+                wrap_width: prepaint.wrap_width,
+                line_height: prepaint.line_height,
                 display_text: prepaint.display_text.clone(),
                 line_len: self.line_len,
             },

@@ -20,7 +20,7 @@ Make paint and hit-test the same object. That is engine honesty *and* the layout
 - Overlay caret (not a 2px sibling in the run row); blink; scroll to caret
 - Up/Down preferred column is **visual**, mapped per line
 - One shaped-text layout: paint, click, and caret all read it (no guessed glyph widths)
-- Wrap on words via `shape_text` (currently `shape_line` — no style-run flex wrap; soft-wrap still open)
+- Soft-wrap on words via `shape_text` (measured line height; selection/caret/hit-test follow wraps)
 
 Do not “fix” clicks by tuning `8.5` px advances.
 

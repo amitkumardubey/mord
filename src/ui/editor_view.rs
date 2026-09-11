@@ -1,7 +1,7 @@
 use crate::editor::{
     buffer::DocumentBuffer,
     decorator::{ConcealMode, Decorator},
-    layout::hit_test_line,
+    layout::hit_test_wrapped_line,
     offset::BufferOffset,
     parser::{BlockKind, MarkdownParser},
     selection::CursorManager,
@@ -420,12 +420,11 @@ Type anywhere to see live inline syntax formatting in action!
         position: Point<Pixels>,
     ) -> Option<(BufferOffset, bool)> {
         let cache = self.line_caches.borrow().get(&line_idx).cloned()?;
-        if position.y < cache.bounds.top() || position.y > cache.bounds.bottom() {
-            // Still allow x hit within vertically nearby clicks on this row handler
-        }
-        let local_x = position.x - cache.bounds.left();
+        let local = point(
+            position.x - cache.bounds.left(),
+            position.y - cache.bounds.top(),
+        );
         let decorated = self.decorate_row(line_idx);
-        // Prefer reshaping for accuracy if cache display matches
         let paint = self.theme.paint_theme();
         let input = crate::editor::layout::build_shaped_line_input(
             &decorated,
@@ -433,12 +432,27 @@ Type anywhere to see live inline syntax formatting in action!
             window.text_style().font(),
             true,
         );
-        let shaped = window
+        let wrapped = window
             .text_system()
-            .shape_line(input.text, input.font_size, &input.runs, None);
-        let hit = hit_test_line(&shaped, &decorated, cache.line_len, local_x);
+            .shape_text(
+                input.text,
+                input.font_size,
+                &input.runs,
+                Some(cache.wrap_width),
+                None,
+            )
+            .ok()
+            .and_then(|mut lines| lines.pop())?;
+        let hit = hit_test_wrapped_line(
+            &wrapped,
+            &decorated,
+            cache.line_len,
+            local,
+            cache.line_height,
+        );
         let line_start = self.buffer.line_to_char(line_idx);
-        let offset = BufferOffset((line_start + hit.buffer_col.get()).min(line_start + cache.line_len));
+        let offset =
+            BufferOffset((line_start + hit.buffer_col.get()).min(line_start + cache.line_len));
         Some((offset, hit.on_task_marker))
     }
 
