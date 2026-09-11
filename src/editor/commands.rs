@@ -1,6 +1,7 @@
 //! Markdown edits as pure functions: one `Edit` per command, no GPUI.
 
 use crate::editor::buffer::DocumentBuffer;
+use crate::editor::parser::{MarkdownParser, SpanStyle};
 use crate::editor::prefix::{parse_prefix, LinePrefixKind};
 
 const INDENT: &str = "    ";
@@ -34,6 +35,133 @@ impl WrapKind {
             WrapKind::Italic => "*",
             WrapKind::Code => "`",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CaretStyle {
+    pub bold: bool,
+    pub italic: bool,
+}
+
+/// Emphasis styles whose content span contains the caret (not on marker glyphs).
+pub fn style_at_caret(buffer: &DocumentBuffer, offset: usize) -> CaretStyle {
+    let offset = offset.min(buffer.len_chars());
+    let point = buffer.char_offset_to_point(offset);
+    let line = buffer.line_without_newline(point.row).unwrap_or_default();
+    let col = point.col.min(line.chars().count());
+    let parsed = MarkdownParser::parse_line(&line);
+    let mut style = CaretStyle::default();
+    for span in &parsed.spans {
+        // Inclusive end so caret after last content char still counts as inside.
+        if col < span.char_range.start || col > span.char_range.end {
+            continue;
+        }
+        match span.style {
+            SpanStyle::Bold => style.bold = true,
+            SpanStyle::Italic => style.italic = true,
+            SpanStyle::BoldItalic => {
+                style.bold = true;
+                style.italic = true;
+            }
+            _ => {}
+        }
+    }
+    style
+}
+
+/// Close an inline wrap at the caret so text after becomes plain.
+/// Example: `**hel|lo**` → `**hel**|lo`.
+pub fn split_inline_mark(
+    buffer: &DocumentBuffer,
+    caret: usize,
+    kind: WrapKind,
+) -> Option<Edit> {
+    let mark = match kind {
+        WrapKind::Bold | WrapKind::Italic => kind.mark(),
+        WrapKind::Code => return None,
+    };
+    let caret = caret.min(buffer.len_chars());
+    let point = buffer.char_offset_to_point(caret);
+    let line = buffer.line_without_newline(point.row).unwrap_or_default();
+    let line_start = buffer.line_to_char(point.row);
+    let col = point.col.min(line.chars().count());
+    let parsed = MarkdownParser::parse_line(&line);
+
+    let content = parsed.spans.iter().find(|span| {
+        if col < span.char_range.start || col > span.char_range.end {
+            return false;
+        }
+        match (&span.style, kind) {
+            (SpanStyle::Bold, WrapKind::Bold) => true,
+            (SpanStyle::Italic, WrapKind::Italic) => true,
+            (SpanStyle::BoldItalic, WrapKind::Bold | WrapKind::Italic) => true,
+            _ => false,
+        }
+    })?;
+
+    let group = content.group_range.clone();
+    let mark_len = if matches!(content.style, SpanStyle::BoldItalic) {
+        3
+    } else {
+        mark.chars().count()
+    };
+    let open_end = group.start + mark_len;
+    let close_start = group.end.saturating_sub(mark_len);
+    if col < open_end || col > close_start {
+        return None;
+    }
+
+    let chars: Vec<char> = line.chars().collect();
+    let before: String = chars[open_end..col].iter().collect();
+    let after: String = chars[col..close_start].iter().collect();
+    let open_mark: String = chars[group.start..open_end].iter().collect();
+    let close_mark: String = chars[close_start..group.end].iter().collect();
+    let new_group = format!("{}{}{}{}", open_mark, before, close_mark, after);
+    let caret_after = line_start + group.start + open_mark.chars().count() + before.chars().count()
+        + close_mark.chars().count();
+
+    Some(Edit {
+        start: line_start + group.start,
+        end: line_start + group.end,
+        new_text: new_group,
+        caret: caret_after,
+    })
+}
+
+/// First sticky insert: wrap `text` in sticky marks; caret before the closers.
+pub fn sticky_insert(
+    buffer: &DocumentBuffer,
+    caret: usize,
+    text: &str,
+    bold: bool,
+    italic: bool,
+) -> Edit {
+    let caret = caret.min(buffer.len_chars());
+    let open = if bold && italic {
+        "***"
+    } else if bold {
+        "**"
+    } else if italic {
+        "*"
+    } else {
+        ""
+    };
+    if open.is_empty() {
+        return Edit {
+            start: caret,
+            end: caret,
+            new_text: text.to_string(),
+            caret: caret + text.chars().count(),
+        };
+    }
+    let new_text = format!("{}{}{}", open, text, open);
+    let caret_after = caret + open.chars().count() + text.chars().count();
+    Edit {
+        start: caret,
+        end: caret,
+        new_text,
+        caret: caret_after,
     }
 }
 
@@ -462,5 +590,51 @@ mod tests {
         let edit = toggle_task(&buf, 0).unwrap();
         apply(&mut buf, edit);
         assert_eq!(buf.text(), "  * [x] Hi");
+    }
+
+    #[test]
+    fn style_at_caret_inside_outside_and_marker() {
+        let buf = DocumentBuffer::from_str("xx **bold** yy");
+        // "xx **bold** yy"
+        //  0123456789...
+        assert_eq!(style_at_caret(&buf, 0), CaretStyle::default());
+        assert!(style_at_caret(&buf, 5).bold); // in "bold"
+        assert!(!style_at_caret(&buf, 3).bold); // on opening *
+        assert!(!style_at_caret(&buf, 11).bold); // after close, on space
+        assert_eq!(style_at_caret(&buf, 5).italic, false);
+    }
+
+    #[test]
+    fn split_inline_mark_mid_bold() {
+        let mut buf = DocumentBuffer::from_str("**hello**");
+        // caret after "hel" → content col 5 (line: **hel|lo**)
+        let caret = 5;
+        let edit = split_inline_mark(&buf, caret, WrapKind::Bold).unwrap();
+        apply(&mut buf, edit);
+        assert_eq!(buf.text(), "**hel**lo");
+    }
+
+    #[test]
+    fn split_inline_mark_mid_italic() {
+        let mut buf = DocumentBuffer::from_str("*hello*");
+        let caret = 4; // *hel|lo*
+        let edit = split_inline_mark(&buf, caret, WrapKind::Italic).unwrap();
+        apply(&mut buf, edit);
+        assert_eq!(buf.text(), "*hel*lo");
+    }
+
+    #[test]
+    fn sticky_insert_bold_and_both() {
+        let mut buf = DocumentBuffer::from_str("ab");
+        let edit = sticky_insert(&buf, 1, "x", true, false);
+        let caret = apply(&mut buf, edit);
+        assert_eq!(buf.text(), "a**x**b");
+        assert_eq!(caret, 4); // after x, before closing **
+
+        let mut buf = DocumentBuffer::from_str("");
+        let edit = sticky_insert(&buf, 0, "hi", true, true);
+        let caret = apply(&mut buf, edit);
+        assert_eq!(buf.text(), "***hi***");
+        assert_eq!(caret, 5); // after hi
     }
 }

@@ -15,12 +15,22 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StickyStyle {
+    bold: bool,
+    italic: bool,
+    row: usize,
+    /// True after the first sticky insert opened a wrap on this session.
+    opened: bool,
+}
+
 pub struct EditorView {
     pub buffer: DocumentBuffer,
     pub cursor: CursorManager,
     pub conceal_mode: ConcealMode,
     /// Row whose line prefixes are revealed because the user is typing there.
     composing_row: Option<usize>,
+    sticky: Option<StickyStyle>,
     pub theme: Theme,
     pub focus_handle: FocusHandle,
     pub dragging: bool,
@@ -60,6 +70,7 @@ Type anywhere to see live Markdown formatting in action!
             cursor: CursorManager::new(),
             conceal_mode: ConcealMode::Live,
             composing_row: None,
+            sticky: None,
             theme: Theme::dark(),
             focus_handle: focus_handle.clone(),
             dragging: false,
@@ -176,6 +187,19 @@ Type anywhere to see live Markdown formatting in action!
         if self.composing_row != Some(self.current_row()) {
             self.composing_row = None;
         }
+        self.clear_sticky_if_left_row();
+    }
+
+    fn clear_sticky(&mut self) {
+        self.sticky = None;
+    }
+
+    fn clear_sticky_if_left_row(&mut self) {
+        if let Some(s) = self.sticky {
+            if s.row != self.current_row() {
+                self.sticky = None;
+            }
+        }
     }
 
     fn apply_edit(&mut self, edit: commands::Edit, cx: &mut Context<Self>) {
@@ -207,12 +231,39 @@ Type anywhere to see live Markdown formatting in action!
             self.buffer.replace_range(range.start, range.end, text);
             self.cursor
                 .set_cursor(BufferOffset(range.start + text.chars().count()));
-        } else {
-            let pos = self.cursor.cursor_offset().get();
-            self.buffer.insert(pos, text);
-            self.cursor
-                .set_cursor(BufferOffset(pos + text.chars().count()));
+            self.clear_sticky();
+            self.mark_line_composing();
+            self.reset_blink(cx);
+            self.scroll_caret_into_view();
+            cx.notify();
+            return;
         }
+
+        let pos = self.cursor.cursor_offset().get();
+        let row = self.current_row();
+        if let Some(sticky) = self.sticky {
+            if sticky.row == row && (sticky.bold || sticky.italic) {
+                if !sticky.opened {
+                    let edit = commands::sticky_insert(
+                        &self.buffer,
+                        pos,
+                        text,
+                        sticky.bold,
+                        sticky.italic,
+                    );
+                    if let Some(s) = self.sticky.as_mut() {
+                        s.opened = true;
+                    }
+                    self.apply_edit(edit, cx);
+                    return;
+                }
+                // Grow: plain insert inside the open wrap.
+            }
+        }
+
+        self.buffer.insert(pos, text);
+        self.cursor
+            .set_cursor(BufferOffset(pos + text.chars().count()));
         self.mark_line_composing();
         self.reset_blink(cx);
         self.scroll_caret_into_view();
@@ -231,6 +282,7 @@ Type anywhere to see live Markdown formatting in action!
             let range = self.cursor.selection.range();
             self.buffer.delete_range(range.start, range.end);
             self.cursor.set_cursor(BufferOffset(range.start));
+            self.clear_sticky();
             self.mark_line_composing();
             self.reset_blink(cx);
             cx.notify();
@@ -256,24 +308,82 @@ Type anywhere to see live Markdown formatting in action!
         }
         let caret = self.cursor.cursor_offset().get();
         let edit = commands::insert_newline(&self.buffer, caret);
+        self.clear_sticky();
         self.apply_edit(edit, cx);
     }
 
     pub fn toggle_bold(&mut self, cx: &mut Context<Self>) {
-        let range = self.cursor.selection.range();
-        if let Some(edit) = commands::wrap_marks(&self.buffer, range.start, range.end, WrapKind::Bold)
-        {
-            self.apply_edit_inner(edit, false, cx);
-        }
+        self.toggle_emphasis(WrapKind::Bold, cx);
     }
 
     pub fn toggle_italic(&mut self, cx: &mut Context<Self>) {
+        self.toggle_emphasis(WrapKind::Italic, cx);
+    }
+
+    fn toggle_emphasis(&mut self, kind: WrapKind, cx: &mut Context<Self>) {
         let range = self.cursor.selection.range();
-        if let Some(edit) =
-            commands::wrap_marks(&self.buffer, range.start, range.end, WrapKind::Italic)
-        {
-            self.apply_edit_inner(edit, false, cx);
+        if range.start != range.end {
+            if let Some(edit) = commands::wrap_marks(&self.buffer, range.start, range.end, kind) {
+                self.clear_sticky();
+                self.apply_edit_inner(edit, false, cx);
+            }
+            return;
         }
+
+        let caret = range.start;
+        let at = commands::style_at_caret(&self.buffer, caret);
+        let inside = match kind {
+            WrapKind::Bold => at.bold,
+            WrapKind::Italic => at.italic,
+            WrapKind::Code => false,
+        };
+
+        if inside {
+            if let Some(edit) = commands::split_inline_mark(&self.buffer, caret, kind) {
+                if let Some(s) = self.sticky.as_mut() {
+                    match kind {
+                        WrapKind::Bold => s.bold = false,
+                        WrapKind::Italic => s.italic = false,
+                        WrapKind::Code => {}
+                    }
+                    if !s.bold && !s.italic {
+                        self.sticky = None;
+                    }
+                }
+                self.apply_edit_inner(edit, false, cx);
+            }
+            return;
+        }
+
+        // Arm / disarm sticky for this line.
+        let row = self.current_row();
+        let mut sticky = self.sticky.unwrap_or(StickyStyle {
+            bold: false,
+            italic: false,
+            row,
+            opened: false,
+        });
+        if sticky.row != row {
+            sticky = StickyStyle {
+                bold: false,
+                italic: false,
+                row,
+                opened: false,
+            };
+        }
+        match kind {
+            WrapKind::Bold => sticky.bold = !sticky.bold,
+            WrapKind::Italic => sticky.italic = !sticky.italic,
+            WrapKind::Code => {}
+        }
+        // Re-arm means next insert opens a fresh wrap.
+        sticky.opened = false;
+        if sticky.bold || sticky.italic {
+            self.sticky = Some(sticky);
+        } else {
+            self.sticky = None;
+        }
+        cx.notify();
     }
 
     pub fn toggle_code(&mut self, cx: &mut Context<Self>) {
@@ -281,6 +391,24 @@ Type anywhere to see live Markdown formatting in action!
         if let Some(edit) = commands::wrap_marks(&self.buffer, range.start, range.end, WrapKind::Code)
         {
             self.apply_edit_inner(edit, false, cx);
+        }
+    }
+
+    fn format_chip_active(&self, bold: bool) -> bool {
+        let caret = self.cursor.cursor_offset().get();
+        let at = commands::style_at_caret(&self.buffer, caret);
+        if bold {
+            at.bold
+                || self
+                    .sticky
+                    .map(|s| s.bold && s.row == self.current_row())
+                    .unwrap_or(false)
+        } else {
+            at.italic
+                || self
+                    .sticky
+                    .map(|s| s.italic && s.row == self.current_row())
+                    .unwrap_or(false)
         }
     }
 
@@ -384,12 +512,14 @@ Type anywhere to see live Markdown formatting in action!
                         if let Some(pos) = self.buffer.redo() {
                             self.cursor.set_cursor(BufferOffset(pos));
                             self.composing_row = None;
+                            self.clear_sticky();
                             self.reset_blink(cx);
                             cx.notify();
                         }
                     } else if let Some(pos) = self.buffer.undo() {
                         self.cursor.set_cursor(BufferOffset(pos));
                         self.composing_row = None;
+                        self.clear_sticky();
                         self.reset_blink(cx);
                         cx.notify();
                     }
@@ -399,6 +529,7 @@ Type anywhere to see live Markdown formatting in action!
                     if let Some(pos) = self.buffer.redo() {
                         self.cursor.set_cursor(BufferOffset(pos));
                         self.composing_row = None;
+                        self.clear_sticky();
                         self.reset_blink(cx);
                         cx.notify();
                     }
@@ -407,6 +538,7 @@ Type anywhere to see live Markdown formatting in action!
                 "a" | "A" => {
                     self.cursor.select_all(&self.buffer);
                     self.composing_row = None;
+                    self.clear_sticky();
                     cx.notify();
                     return;
                 }
@@ -638,13 +770,13 @@ impl Render for EditorView {
                             .bg(rgb(theme.bg_code_inline))
                             .gap_1()
                             .child(
-                                mode_chip("B", false, theme).on_mouse_down(
+                                mode_chip("B", self.format_chip_active(true), theme).on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(|view, _, _, cx| view.toggle_bold(cx)),
                                 ),
                             )
                             .child(
-                                mode_chip("I", false, theme).on_mouse_down(
+                                mode_chip("I", self.format_chip_active(false), theme).on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(|view, _, _, cx| view.toggle_italic(cx)),
                                 ),
