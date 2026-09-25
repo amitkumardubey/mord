@@ -8,7 +8,10 @@ pub mod prefix;
 pub mod selection;
 
 pub use buffer::{DocumentBuffer, TextPoint};
-pub use commands::{set_heading_level, wrap_marks, Edit, WrapKind};
+pub use commands::{
+    set_heading_level, split_inline_mark, sticky_insert, style_at_caret, wrap_marks, CaretStyle,
+    Edit, WrapKind,
+};
 pub use decorator::{
     ConcealMode, DecoratedLine, Decorator, VisualFontStyle, VisualFontWeight, VisualRole,
     VisualRun,
